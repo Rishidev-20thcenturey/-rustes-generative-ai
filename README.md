@@ -1,8 +1,4 @@
- Replacement README.md
-
-Copy this and paste it as the new README.md:
-
-```markdown
+ 
 # RAY-IMAGE
 
 **An efficient text-to-image generation system, built from scratch.**
@@ -100,6 +96,6 @@ Apache 2.0 — free for research and commercial use.
 
 ## Contact
 
-For collaboration, research, or general inquiries: [your email]
+For collaboration, research, or general inquiries: [rishirajc406@gmail.com]
 
 ---
