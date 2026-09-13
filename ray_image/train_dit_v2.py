@@ -9,6 +9,7 @@ Pipeline:
 The training model is the only trainable component. Gradient checkpointing is
 applied to every DiT block so batch size 4 remains practical on 16 GB GPUs.
 Checkpoints are written locally every 500 steps and optionally mirrored to HF.
+HF checkpoints use a rolling window: only the newest 4 checkpoint files are kept.
 """
 
 import argparse
@@ -48,6 +49,7 @@ TEXT_MAX_TOKENS = 256
 
 CHECKPOINT_EVERY = 500
 LOG_EVERY = 100
+HF_CHECKPOINT_WINDOW = 4
 
 
 def seed_everything(seed: int) -> None:
@@ -185,8 +187,6 @@ def checkpointed_forward(
     text_ctx = model.text_ctx_proj(text)
 
     for block in model.blocks:
-        # use_reentrant=False supports keyword-free tensor arguments and avoids
-        # the legacy checkpointing behavior in recent PyTorch releases.
         x = checkpoint(
             lambda x_, cond_, text_: block(x_, cond_, text_, text_mask=text_mask),
             x,
@@ -209,6 +209,46 @@ def checkpointed_forward(
     )
 
 
+def _checkpoint_sort_key(filename: str):
+    """Return a numeric step key for deterministic oldest-first cleanup."""
+    stem = Path(filename).stem
+    try:
+        return int(stem.rsplit("_", 1)[1])
+    except (ValueError, IndexError):
+        return -1
+
+
+def cleanup_hf_checkpoints(api: HfApi, repo_id: str) -> None:
+    """Keep only the newest HF DiT checkpoints after a successful upload."""
+    try:
+        files = api.list_repo_files(repo_id=repo_id, repo_type="model")
+        checkpoints = sorted(
+            {
+                path
+                for path in files
+                if Path(path).name.startswith("ray_dit_v2_step_")
+                and Path(path).suffix == ".pt"
+            },
+            key=_checkpoint_sort_key,
+        )
+
+        stale = checkpoints[:-HF_CHECKPOINT_WINDOW]
+        for path in stale:
+            try:
+                api.delete_file(
+                    path_in_repo=path,
+                    repo_id=repo_id,
+                    repo_type="model",
+                    commit_message=f"chore: remove old DiT v2 checkpoint {Path(path).name}",
+                )
+                print(f"[HF cleanup] deleted {path}")
+            except Exception as exc:
+                print(f"[HF cleanup] failed to delete {path}: {exc}")
+    except Exception as exc:
+        # Upload already succeeded; cleanup failure must not kill training.
+        print(f"[HF cleanup] listing failed for {repo_id}: {exc}")
+
+
 def upload_checkpoint(local_path: Path, repo_id: str) -> None:
     token = os.getenv("HF_TOKEN")
     if not token:
@@ -224,6 +264,7 @@ def upload_checkpoint(local_path: Path, repo_id: str) -> None:
         repo_type="model",
     )
     print(f"[HF] uploaded {local_path.name} -> {repo_id}")
+    cleanup_hf_checkpoints(api, repo_id)
 
 
 def save_checkpoint(
@@ -362,7 +403,6 @@ def main():
             images, captions = next_batch(iterator, args.batch_size)
         images = images.to(device, non_blocking=True)
 
-        # Frozen VAE: use posterior mean for deterministic training latents.
         with torch.inference_mode():
             _, clean_latents, _, _ = vae(images)
 
