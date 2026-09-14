@@ -62,14 +62,10 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 def apply_rope(q: torch.Tensor, k: torch.Tensor, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply 1D RoPE over token positions to self-attention q/k.
-
-    q/k shape: [B, heads, L, head_dim].
-    """
+    """Apply 1D RoPE over token positions to self-attention q/k."""
     head_dim = q.shape[-1]
     if head_dim % 2 != 0:
         raise ValueError("RoPE requires an even attention head dimension")
-
     half = head_dim // 2
     device = q.device
     freq = torch.exp(
@@ -79,11 +75,10 @@ def apply_rope(q: torch.Tensor, k: torch.Tensor, seq_len: int) -> tuple[torch.Te
     )
     positions = torch.arange(seq_len, device=device, dtype=torch.float32)
     angles = positions[:, None] * freq[None, :]
-    cos = angles.cos().to(dtype=q.dtype)[None, None, :, :]
-    sin = angles.sin().to(dtype=q.dtype)[None, None, :, :]
-    cos = torch.cat((cos, cos), dim=-1)
-    sin = torch.cat((sin, sin), dim=-1)
-
+    cos_half = angles.cos().to(dtype=q.dtype)[None, None, :, :]
+    sin_half = angles.sin().to(dtype=q.dtype)[None, None, :, :]
+    cos = torch.cat((cos_half, cos_half), dim=-1)
+    sin = torch.cat((sin_half, sin_half), dim=-1)
     return q * cos + _rotate_half(q) * sin, k * cos + _rotate_half(k) * sin
 
 
@@ -152,11 +147,10 @@ class CrossAttention(nn.Module):
         q = self.q(x).view(b, n, self.heads, self.head_dim).transpose(1, 2)
         k = self.k(context).view(b, l, self.heads, self.head_dim).transpose(1, 2)
         v = self.v(context).view(b, l, self.heads, self.head_dim).transpose(1, 2)
-        key_mask = None
+        attn_mask = None
         if context_mask is not None:
-            key_mask = context_mask[:, None, None, :]
-            key_mask = key_mask.to(device=q.device)
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=None if key_mask is None else ~key_mask)
+            attn_mask = (~context_mask).to(device=q.device)[:, None, None, :]
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         out = out.transpose(1, 2).reshape(b, n, d)
         out = self.proj(out)
         if self.cross_gate is not None:
@@ -225,9 +219,8 @@ class RAYDiT_v3(nn.Module):
         self.time = TimestepEmbedding(dim)
         self.text_proj = nn.Linear(cond_dim, dim)
         self.text_ctx_proj = nn.Linear(cond_dim, dim) if cond_dim != dim else nn.Identity()
-
         self.blocks = nn.ModuleList(
-            [RAYDiTBlock_v3(dim, heads, cond_dim=cond_dim, context_dim=dim, cross_gate=cross_gate) for _ in range(depth)]
+            [RAYDiTBlock_v3(dim, heads, context_dim=dim, cross_gate=cross_gate) for _ in range(depth)]
         )
         self.norm = RMSNorm(dim)
         self.out = nn.Linear(dim, patch * patch * latent_channels)
@@ -256,8 +249,6 @@ class RAYDiT_v3(nn.Module):
         x = self.in_proj(z)
         ph, pw = x.shape[-2:]
         x = x.flatten(2).transpose(1, 2)
-
-        # Keep the Qwen context in the model's forward dtype (fp16 under T4 autocast).
         text = text.to(dtype=x.dtype)
         if text_mask is None:
             pooled = text.mean(dim=1)
@@ -265,9 +256,8 @@ class RAYDiT_v3(nn.Module):
             valid = (~text_mask).to(dtype=text.dtype).unsqueeze(-1)
             pooled = (text * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1.0)
 
-        cond = self.time(t) + self.text_proj(pooled)
+        cond = self.time(t).to(dtype=x.dtype) + self.text_proj(pooled)
         text_ctx = self.text_ctx_proj(text)
-
         for block in self.blocks:
             x = block(x, cond, text_ctx, text_mask=text_mask)
 
