@@ -48,8 +48,9 @@ TEXT_DIM = 2560
 TEXT_MAX_TOKENS = 256
 
 CHECKPOINT_EVERY = 500
-LOG_EVERY = 100
+LOG_EVERY = 50
 HF_CHECKPOINT_WINDOW = 4
+TRAIN_LR = 2e-5
 
 
 def seed_everything(seed: int) -> None:
@@ -267,13 +268,28 @@ def upload_checkpoint(local_path: Path, repo_id: str) -> None:
     cleanup_hf_checkpoints(api, repo_id)
 
 
+def checkpoint_has_nonfinite_weights(model: RAYDiT_v2) -> bool:
+    """Return True when any model parameter/buffer contains NaN or Inf."""
+    with torch.no_grad():
+        for name, tensor in model.state_dict().items():
+            if not torch.isfinite(tensor).all().item():
+                print(f"[checkpoint guard] non-finite weights in {name}; refusing to save")
+                return True
+    return False
+
+
 def save_checkpoint(
     path: Path,
     model: RAYDiT_v2,
     optimizer: AdamW,
     step: int,
     seed: int,
-) -> None:
+) -> bool:
+    """Save only a finite model checkpoint; never write corrupted weights."""
+    if checkpoint_has_nonfinite_weights(model):
+        print(f"[checkpoint guard] SKIP step={step}: corrupted model weights")
+        return False
+
     torch.save(
         {
             "stage": "dit_v2_n8",
@@ -296,6 +312,7 @@ def save_checkpoint(
         },
         path,
     )
+    return True
 
 
 def load_resume(
@@ -320,7 +337,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train RAY-IMAGE DiT v2 with flow matching.")
     parser.add_argument("--steps", type=int, default=200000)
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=TRAIN_LR)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--start-step", type=int, default=0)
@@ -383,10 +400,11 @@ def main():
     print(f"[DiT] trainable parameters: {parameter_count:,}")
     print(f"[data] {MONET_REPO} / parquet / train (streaming)")
     print(f"[config] batch={args.batch_size} lr={args.lr:.2e} target_steps={args.steps}")
+    print("[precision] DiT forward autocast=bfloat16; Qwen text hidden=bfloat16")
+    print("[stability] grad_clip=1.0; NaN guard=enabled; finite-checkpoints=enabled")
 
     autocast_enabled = device.type == "cuda"
-    autocast_dtype = torch.float16 if autocast_enabled else torch.float32
-    scaler = torch.amp.GradScaler("cuda", enabled=autocast_enabled)
+    autocast_dtype = torch.bfloat16
 
     running_loss = 0.0
     running_count = 0
@@ -396,6 +414,8 @@ def main():
     )
 
     for step in range(last_step + 1, args.steps + 1):
+        nan_status = "OK"
+
         try:
             images, captions = next_batch(iterator, args.batch_size)
         except StopIteration:
@@ -413,7 +433,7 @@ def main():
             )
 
         clean_latents = clean_latents.to(device=device, dtype=torch.float32)
-        text_hidden = text_hidden.to(device=device, dtype=torch.float32)
+        text_hidden = text_hidden.to(device=device, dtype=torch.bfloat16)
         text_mask = text_mask.to(device=device)
 
         noise = torch.randn_like(clean_latents)
@@ -437,11 +457,33 @@ def main():
             )
             loss = F.mse_loss(prediction.float(), target_velocity.float())
 
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
+        if torch.isnan(loss).any().item():
+            nan_status = "LOSS_NAN"
+            optimizer.zero_grad(set_to_none=True)
+            pbar.update(1)
+            pbar.set_postfix(loss="nan")
+            if step % LOG_EVERY == 0:
+                print(
+                    f"step={step} loss=nan grad_norm=nan nan_status={nan_status}"
+                )
+            continue
+
+        loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        scaler.step(optimizer)
-        scaler.update()
+
+        if not torch.isfinite(grad_norm).item():
+            nan_status = "GRAD_NAN"
+            optimizer.zero_grad(set_to_none=True)
+            pbar.update(1)
+            pbar.set_postfix(loss=f"{loss.item():.4f}")
+            if step % LOG_EVERY == 0:
+                print(
+                    f"step={step} loss={loss.item():.6f} "
+                    f"grad_norm=nan nan_status={nan_status}"
+                )
+            continue
+
+        optimizer.step()
 
         running_loss += float(loss.item())
         running_count += 1
@@ -454,7 +496,7 @@ def main():
             print(
                 f"step={step} loss={loss.item():.6f} "
                 f"loss_avg={mean_loss:.6f} grad_norm={float(grad_norm):.4f} "
-                f"vram_peak={vram_gb:.2f}GB"
+                f"nan_status={nan_status} vram_peak={vram_gb:.2f}GB"
             )
             running_loss = 0.0
             running_count = 0
@@ -462,19 +504,23 @@ def main():
 
         if step % CHECKPOINT_EVERY == 0:
             checkpoint_path = output_dir / f"ray_dit_v2_step_{step:07d}.pt"
-            save_checkpoint(checkpoint_path, model, optimizer, step, args.seed)
-            print(f"[checkpoint] {checkpoint_path}")
-            if not args.no_hf_upload:
-                upload_checkpoint(checkpoint_path, args.hf_repo)
+            if save_checkpoint(checkpoint_path, model, optimizer, step, args.seed):
+                print(f"[checkpoint] {checkpoint_path}")
+                if not args.no_hf_upload:
+                    upload_checkpoint(checkpoint_path, args.hf_repo)
+            elif checkpoint_path.exists():
+                checkpoint_path.unlink()
 
     pbar.close()
 
     if args.steps % CHECKPOINT_EVERY != 0:
         checkpoint_path = output_dir / f"ray_dit_v2_step_{args.steps:07d}.pt"
-        save_checkpoint(checkpoint_path, model, optimizer, args.steps, args.seed)
-        print(f"[checkpoint] {checkpoint_path}")
-        if not args.no_hf_upload:
-            upload_checkpoint(checkpoint_path, args.hf_repo)
+        if save_checkpoint(checkpoint_path, model, optimizer, args.steps, args.seed):
+            print(f"[checkpoint] {checkpoint_path}")
+            if not args.no_hf_upload:
+                upload_checkpoint(checkpoint_path, args.hf_repo)
+        elif checkpoint_path.exists():
+            checkpoint_path.unlink()
 
 
 if __name__ == "__main__":
