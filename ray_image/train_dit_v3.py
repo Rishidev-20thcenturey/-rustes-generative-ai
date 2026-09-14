@@ -179,11 +179,13 @@ def checkpointed_forward(
     cond = model.time(t).to(dtype=x.dtype) + model.text_proj(pooled)
     text_ctx = model.text_ctx_proj(text)
 
+    def run_block(block_, x_, cond_, text_):
+        return block_(x_, cond_, text_, text_mask=text_mask)
+
     for block in model.blocks:
         x = checkpoint(
-            lambda x_, cond_, text_: block(
-                x_, cond_, text_, text_mask=text_mask
-            ),
+            run_block,
+            block,
             x,
             cond,
             text_ctx,
