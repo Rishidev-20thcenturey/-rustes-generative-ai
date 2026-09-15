@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from datasets import load_dataset
-from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub import HfApi, create_repo, hf_hub_download
 from PIL import Image
 
 from .text_encoder import RAYTextEncoder
@@ -84,7 +84,6 @@ def upload_chunk(path: Path, api: HfApi, repo_id: str) -> None:
             "HF_TOKEN is required to upload cache chunks. "
             "Use --no-hf-upload only for a local build."
         )
-    api.create_repo(repo_id=repo_id, repo_type="dataset", exist_ok=True)
     api.upload_file(
         path_or_fileobj=str(path),
         path_in_repo=path.name,
@@ -206,7 +205,22 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    api = HfApi(token=os.getenv("HF_TOKEN"))
+    hf_token = os.getenv("HF_TOKEN")
+    if not args.no_hf_upload:
+        if not hf_token:
+            raise RuntimeError(
+                "HF_TOKEN is required for resumable cache uploads. "
+                "Use --no-hf-upload only for a local build."
+            )
+        create_repo(
+            repo_id="Rishix500/monet-qwen-cache-50k",
+            repo_type="dataset",
+            exist_ok=True,
+            private=True,
+            token=hf_token,
+        )
+
+    api = HfApi(token=hf_token)
     existing_hf = set() if args.no_hf_upload else hf_repo_files(api, args.hf_repo)
     dataset = load_dataset(MONET_REPO, name="parquet", split="train", streaming=True)
 
