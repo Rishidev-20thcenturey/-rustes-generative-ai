@@ -5,9 +5,11 @@ embeddings are sampled directly from the local MONET 50k cache.
 """
 
 import argparse
+import io
 import os
 import random
 import re
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -41,6 +43,9 @@ CHECKPOINT_EVERY = 500
 LOG_EVERY = 100
 WARMUP_STEPS = 500
 HF_CHECKPOINT_WINDOW = 4
+LOCAL_CHECKPOINT_WINDOW = 2
+LOCAL_CHECKPOINT_DIR = "/kaggle/tmp/checkpoints"
+DISK_REFUSE_SAVE_PCT = 90.0
 TRAIN_LR = 5e-5
 GRAD_CLIP = 1.0
 CACHE_CHUNK_RE = re.compile(r"^monet_qwen_cache_(\d+)k_(\d+)k\.pt$")
@@ -228,8 +233,10 @@ def checkpointed_forward(model, z_t, t, text, text_mask):
         pooled = (text * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1.0)
     cond = model.time(t).to(dtype=x.dtype) + model.text_proj(pooled)
     text_ctx = model.text_ctx_proj(text)
+
     def run_block(block_, x_, cond_, text_):
         return block_(x_, cond_, text_, text_mask=text_mask)
+
     for block in model.blocks:
         x = checkpoint(run_block, block, x, cond, text_ctx, use_reentrant=False)
     x = model.out(model.norm(x))
@@ -258,6 +265,50 @@ def cleanup_hf_checkpoints(api: HfApi, repo_id: str) -> None:
         print(f"[HF cleanup] listing failed for {repo_id}: {exc}")
 
 
+def log_disk_usage(path: Path, prefix: str = "[disk]") -> float:
+    usage = shutil.disk_usage(path)
+    percent = (usage.used / usage.total) * 100.0 if usage.total else 100.0
+    print(f"{prefix} used={usage.used / (1024 ** 3):.2f}GB free={usage.free / (1024 ** 3):.2f}GB total={usage.total / (1024 ** 3):.2f}GB ({percent:.1f}%)")
+    return percent
+
+
+def _local_checkpoint_paths(output_dir: Path):
+    return sorted((p for p in output_dir.glob("ray_dit_v3_step_*.pt") if p.is_file()), key=lambda p: _checkpoint_sort_key(p.name))
+
+
+def cleanup_local_checkpoints(output_dir: Path, keep: int = LOCAL_CHECKPOINT_WINDOW) -> None:
+    checkpoints = _local_checkpoint_paths(output_dir)
+    for path in checkpoints[:-keep] if keep > 0 else checkpoints:
+        try:
+            path.unlink()
+            print(f"[local cleanup] deleted {path}")
+        except OSError as exc:
+            print(f"[local cleanup] failed to delete {path}: {exc}")
+
+
+def _checkpoint_payload(model, optimizer, step, seed):
+    return {
+        "stage": "dit_v3_n8",
+        "step": step,
+        "seed": seed,
+        "config": {
+            "image_size": IMAGE_SIZE,
+            "latent_channels": LATENT_CHANNELS,
+            "latent_size": LATENT_SIZE,
+            "dim": MODEL_DIM,
+            "depth": MODEL_DEPTH,
+            "heads": MODEL_HEADS,
+            "patch": MODEL_PATCH,
+            "text_dim": TEXT_DIM,
+            "text_max_tokens": TEXT_MAX_TOKENS,
+            "cross_gate": True,
+            "flow_matching": "linear_gaussian",
+        },
+        "dit": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+    }
+
+
 def upload_checkpoint(local_path: Path, repo_id: str) -> None:
     token = os.getenv("HF_TOKEN")
     if not token:
@@ -268,6 +319,23 @@ def upload_checkpoint(local_path: Path, repo_id: str) -> None:
     api.upload_file(path_or_fileobj=str(local_path), path_in_repo=local_path.name, repo_id=repo_id, repo_type="model")
     print(f"[HF] uploaded {local_path.name} -> {repo_id}")
     cleanup_hf_checkpoints(api, repo_id)
+
+
+def upload_checkpoint_direct(model, optimizer, step: int, seed: int, repo_id: str) -> None:
+    token = os.getenv("HF_TOKEN")
+    if not token:
+        raise RuntimeError("HF_TOKEN is required for direct checkpoint upload when disk is near full")
+    payload = _checkpoint_payload(model, optimizer, step, seed)
+    buffer = io.BytesIO()
+    torch.save(payload, buffer)
+    buffer.seek(0)
+    filename = f"ray_dit_v3_step_{step:07d}.pt"
+    api = HfApi(token=token)
+    api.create_repo(repo_id=repo_id, repo_type="model", exist_ok=True)
+    api.upload_file(path_or_fileobj=buffer, path_in_repo=filename, repo_id=repo_id, repo_type="model", commit_message=f"upload DiT v3 checkpoint {filename}")
+    print(f"[HF] uploaded {filename} directly from memory (local save skipped)")
+    cleanup_hf_checkpoints(api, repo_id)
+    buffer.close()
 
 
 def checkpoint_has_corruption(model: RAYDiT_v3) -> bool:
@@ -283,7 +351,7 @@ def save_checkpoint(path, model, optimizer, step, seed) -> bool:
     if checkpoint_has_corruption(model):
         print(f"[checkpoint guard] SKIP step={step}: corrupted model weights")
         return False
-    torch.save({"stage": "dit_v3_n8", "step": step, "seed": seed, "config": {"image_size": IMAGE_SIZE, "latent_channels": LATENT_CHANNELS, "latent_size": LATENT_SIZE, "dim": MODEL_DIM, "depth": MODEL_DEPTH, "heads": MODEL_HEADS, "patch": MODEL_PATCH, "text_dim": TEXT_DIM, "text_max_tokens": TEXT_MAX_TOKENS, "cross_gate": True, "flow_matching": "linear_gaussian"}, "dit": model.state_dict(), "optimizer": optimizer.state_dict()}, path)
+    torch.save(_checkpoint_payload(model, optimizer, step, seed), path)
     return True
 
 
@@ -306,6 +374,45 @@ def set_learning_rate(optimizer, base_lr, step) -> float:
     return lr
 
 
+def save_or_upload_checkpoint(output_dir: Path, dit, optimizer, step: int, seed: int, hf_repo: str, no_hf_upload: bool) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    local_disk_pct = log_disk_usage(output_dir, prefix=f"[disk] checkpoint step={step}")
+    checkpoint_path = output_dir / f"ray_dit_v3_step_{step:07d}.pt"
+
+    if local_disk_pct >= DISK_REFUSE_SAVE_PCT:
+        print(f"[checkpoint] local disk usage {local_disk_pct:.1f}% >= {DISK_REFUSE_SAVE_PCT:.1f}%; refusing local save")
+        if no_hf_upload:
+            print("[checkpoint] HF upload disabled; checkpoint skipped")
+            return
+        if checkpoint_has_corruption(dit):
+            print(f"[checkpoint guard] SKIP step={step}: corrupted model weights")
+            return
+        upload_checkpoint_direct(dit, optimizer, step, seed, hf_repo)
+        return
+
+    try:
+        if save_checkpoint(checkpoint_path, dit, optimizer, step, seed):
+            print(f"[checkpoint] {checkpoint_path}")
+            if not no_hf_upload:
+                upload_checkpoint(checkpoint_path, hf_repo)
+            cleanup_local_checkpoints(output_dir, keep=LOCAL_CHECKPOINT_WINDOW)
+            log_disk_usage(output_dir, prefix=f"[disk] after checkpoint step={step}")
+    except (RuntimeError, OSError) as exc:
+        print(f"[checkpoint] local save failed at step={step}: {exc}")
+        if checkpoint_path.exists():
+            try:
+                checkpoint_path.unlink()
+            except OSError:
+                pass
+        if no_hf_upload:
+            raise
+        if checkpoint_has_corruption(dit):
+            print(f"[checkpoint guard] SKIP step={step}: corrupted model weights")
+            return
+        upload_checkpoint_direct(dit, optimizer, step, seed, hf_repo)
+        cleanup_local_checkpoints(output_dir, keep=LOCAL_CHECKPOINT_WINDOW)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train RAY-IMAGE DiT v3 with flow matching.")
     parser.add_argument("--steps", type=int, default=200000)
@@ -315,7 +422,7 @@ def main():
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--start-step", type=int, default=0)
     parser.add_argument("--cache-path", type=str, default=None)
-    parser.add_argument("--output-dir", type=str, default="/kaggle/working/ray_image_dit_n8_v3")
+    parser.add_argument("--output-dir", type=str, default=LOCAL_CHECKPOINT_DIR)
     parser.add_argument("--hf-repo", type=str, default=HF_DEFAULT_REPO)
     parser.add_argument("--no-hf-upload", action="store_true")
     args = parser.parse_args()
@@ -355,6 +462,7 @@ def main():
     print(f"[config] batch={args.batch_size} lr={args.lr:.2e} warmup={WARMUP_STEPS} target_steps={args.steps}")
     print("[precision] DiT forward fp16; cached Qwen embeddings are fp16")
     print("[stability] grad_clip=1.0; NaN guards=enabled; finite-checkpoints=enabled")
+    print(f"[disk] checkpoint_dir={output_dir} local_window={LOCAL_CHECKPOINT_WINDOW} refuse_save_at={DISK_REFUSE_SAVE_PCT:.1f}%")
     nan_skip_count = 0
     running_loss = 0.0
     running_count = 0
@@ -413,22 +521,11 @@ def main():
             running_loss = 0.0
             running_count = 0
         if step % CHECKPOINT_EVERY == 0:
-            checkpoint_path = output_dir / f"ray_dit_v3_step_{step:07d}.pt"
-            if save_checkpoint(checkpoint_path, dit, optimizer, step, args.seed):
-                print(f"[checkpoint] {checkpoint_path}")
-                if not args.no_hf_upload:
-                    upload_checkpoint(checkpoint_path, args.hf_repo)
-            elif checkpoint_path.exists():
-                checkpoint_path.unlink()
+            save_or_upload_checkpoint(output_dir, dit, optimizer, step, args.seed, args.hf_repo, args.no_hf_upload)
     pbar.close()
     if args.steps % CHECKPOINT_EVERY != 0:
-        checkpoint_path = output_dir / f"ray_dit_v3_step_{args.steps:07d}.pt"
-        if save_checkpoint(checkpoint_path, dit, optimizer, args.steps, args.seed):
-            print(f"[checkpoint] {checkpoint_path}")
-            if not args.no_hf_upload:
-                upload_checkpoint(checkpoint_path, args.hf_repo)
-        elif checkpoint_path.exists():
-            checkpoint_path.unlink()
+        save_or_upload_checkpoint(output_dir, dit, optimizer, args.steps, args.seed, args.hf_repo, args.no_hf_upload)
+
 
 if __name__ == "__main__":
     main()
