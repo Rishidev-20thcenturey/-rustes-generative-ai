@@ -59,6 +59,7 @@ def load_vae(device: torch.device) -> RAYVAE_v2:
         repo_type="model",
         token=os.getenv("HF_TOKEN"),
     )
+    checkpoint_path = Path(checkpoint_path)
     checkpoint_data = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     vae = RAYVAE_v2(latent_channels=LATENT_CHANNELS, base_channels=64)
     vae.load_state_dict(checkpoint_data.get("vae", checkpoint_data), strict=True)
