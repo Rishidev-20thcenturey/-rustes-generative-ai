@@ -149,6 +149,8 @@ class CrossAttention(nn.Module):
         v = self.v(context).view(b, l, self.heads, self.head_dim).transpose(1, 2)
         attn_mask = None
         if context_mask is not None:
+            # v2's mask convention is True=padding/ignore. SDPA's bool mask is
+            # True=keep, so invert the same mask before passing it to attention.
             attn_mask = (~context_mask).to(device=q.device)[:, None, None, :]
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         out = out.transpose(1, 2).reshape(b, n, d)
@@ -182,7 +184,11 @@ class RAYDiTBlock_v3(nn.Module):
         h = self.norm1(x)
         h = h * (1.0 + scale[:, None, :]) + shift[:, None, :]
         x = x + self.self_attn(h)
-        x = x + self.cross_attn(self.norm_cross(x), text, text_mask=text_mask)
+        x = x + self.cross_attn(
+            self.norm_cross(x),
+            text,
+            context_mask=text_mask,
+        )
         x = x + self.ffn(self.norm2(x))
         return x
 
