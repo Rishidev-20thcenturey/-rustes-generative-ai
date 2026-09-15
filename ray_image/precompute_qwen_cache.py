@@ -1,4 +1,4 @@
-"""Build a resumable 50k MONET VAE + Qwen cache in five 10k chunks.
+"""Build a resumable MONET VAE + Qwen cache in 10k chunks.
 
 Each chunk covers a fixed 10,000-sample source range and is uploaded immediately
 as a Hugging Face Dataset file. Existing HF chunks are detected before work so a
@@ -29,9 +29,8 @@ LATENT_CHANNELS = 16
 LATENT_SIZE = 32
 TEXT_DIM = 2560
 CACHE_TOKENS = 47
-TOTAL_SAMPLES = 50_000
+TOTAL_SAMPLES = 100_000
 CHUNK_SIZE = 10_000
-NUM_CHUNKS = TOTAL_SAMPLES // CHUNK_SIZE
 LOG_EVERY = 1_000
 
 
@@ -95,10 +94,9 @@ def upload_chunk(path: Path, api: HfApi, repo_id: str) -> None:
     print(f"[HF] uploaded {path.name} -> dataset/{repo_id}")
 
 
-def build_chunk(dataset, start: int, end: int, batch_size: int, vae: RAYVAE_v2,
+def build_chunk(ds_iter, start: int, end: int, batch_size: int, vae: RAYVAE_v2,
                 text_encoder: RAYTextEncoder, device: torch.device,
                 output_dir: Path) -> Path:
-    iterator = iter(dataset.skip(start))
     latents = []
     text_embs = []
     masks = []
@@ -110,7 +108,7 @@ def build_chunk(dataset, start: int, end: int, batch_size: int, vae: RAYVAE_v2,
         images = []
         captions = []
         while len(images) < batch_size and source_seen < (end - start):
-            sample = next(iterator)
+            sample = next(ds_iter)
             source_seen += 1
             image = sample.get("thumbnail")
             caption = sample.get("caption_florence-2-large")
@@ -188,7 +186,7 @@ def build_chunk(dataset, start: int, end: int, batch_size: int, vae: RAYVAE_v2,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build the 50k MONET Qwen cache as five resumable 10k chunks.")
+    parser = argparse.ArgumentParser(description="Build the 100k MONET Qwen cache as resumable 10k chunks.")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-dir", type=str, default=DEFAULT_OUTPUT_DIR)
@@ -225,8 +223,13 @@ def main() -> None:
     existing_hf = set() if args.no_hf_upload else hf_repo_files(api, args.hf_repo)
     dataset = load_dataset(MONET_REPO, name="parquet", split="train", streaming=True)
 
+    start_chunk = 5
+    end_chunk = 10
+    dataset = dataset.skip(50_000)
+    ds_iter = iter(dataset)
+
     completed = 0
-    for chunk_index in range(NUM_CHUNKS):
+    for chunk_index in range(start_chunk, end_chunk):
         start = chunk_index * CHUNK_SIZE
         end = start + CHUNK_SIZE
         filename = chunk_filename(start, end)
@@ -234,18 +237,22 @@ def main() -> None:
 
         if filename in existing_hf:
             print(f"[resume] HF already has {filename}; skipping chunk {start}:{end}")
+            for _ in range(CHUNK_SIZE):
+                next(ds_iter)
             completed += 1
             continue
 
         if local_path.is_file():
             print(f"[resume] local chunk exists: {local_path}")
+            for _ in range(CHUNK_SIZE):
+                next(ds_iter)
             if not args.no_hf_upload:
                 upload_chunk(local_path, api, args.hf_repo)
                 existing_hf.add(filename)
             completed += 1
             continue
 
-        print(f"[build] chunk {chunk_index + 1}/{NUM_CHUNKS}: source {start}:{end}")
+        print(f"[build] chunk {chunk_index + 1}: source {start}:{end}")
         vae = load_vae(device)
         text_encoder = RAYTextEncoder(
             model_name=RAYTextEncoder.MODEL_ID,
@@ -255,7 +262,7 @@ def main() -> None:
 
         try:
             built_path = build_chunk(
-                dataset, start, end, args.batch_size,
+                ds_iter, start, end, args.batch_size,
                 vae, text_encoder, device, output_dir,
             )
             if not args.no_hf_upload:
@@ -270,7 +277,7 @@ def main() -> None:
             del vae
             torch.cuda.empty_cache()
 
-    print(f"[done] completed {completed}/{NUM_CHUNKS} cache chunks")
+    print(f"[done] completed {completed}/{end_chunk - start_chunk} cache chunks")
 
 
 if __name__ == "__main__":
