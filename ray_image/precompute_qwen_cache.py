@@ -1,5 +1,7 @@
 """Precompute the first 50k MONET VAE + Qwen embeddings for N8 DiT v3."""
 
+# Cache schema: latents [N,16,32,32] fp16, text_emb [N,47,2560] fp16, mask [N,47] bool.
+
 import argparse
 import os
 import random
@@ -109,15 +111,12 @@ def main() -> None:
     cached = 0
     skipped = 0
 
-    # 50k x ([16,32,32] + [47,2560]) fp16 is about 15 GB before overhead.
+    # 50k samples of these fp16 tensors are roughly 15 GB before Python/storage overhead.
     while seen < args.samples:
         images = []
         captions = []
         while len(images) < args.batch_size and seen < args.samples:
-            try:
-                sample = next(iterator)
-            except StopIteration:
-                break
+            sample = next(iterator)
             seen += 1
             image = sample.get("thumbnail")
             caption = sample.get("caption_florence-2-large")
@@ -137,10 +136,7 @@ def main() -> None:
         with torch.inference_mode():
             try:
                 _, z, _, _ = vae(image_batch)
-                text_hidden, mask = text_encoder.encode_texts(
-                    captions,
-                    max_length=CACHE_TOKENS,
-                )
+                text_hidden, mask = text_encoder.encode_texts(captions, max_length=CACHE_TOKENS)
             except Exception as exc:
                 skipped += len(images)
                 print(f"[skip] encoder batch failure: {exc}")
