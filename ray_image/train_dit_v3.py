@@ -30,6 +30,8 @@ MONET_REPO = "jasperai/monet"
 VAE_REPO = "Rishix500/ray-image-vae-n8"
 VAE_CHECKPOINT = "ray_vae_v2_step_0047500.pt"
 HF_DEFAULT_REPO = "Rishix500/ray-image-dit-n8-v3"
+MILESTONE_REPO = "Rishix500/ray-image-dit-n8-v3-milestones"
+MILESTONE_INTERVAL = 10000
 IMAGE_SIZE = 256
 LATENT_CHANNELS = 16
 LATENT_SIZE = 32
@@ -396,6 +398,20 @@ def save_or_upload_checkpoint(output_dir: Path, dit, optimizer, step: int, seed:
             if not no_hf_upload:
                 upload_checkpoint(checkpoint_path, hf_repo)
             cleanup_local_checkpoints(output_dir, keep=LOCAL_CHECKPOINT_WINDOW)
+            if step > 0 and step % MILESTONE_INTERVAL == 0:
+                print(f"\n💎 [milestone] Step {step} reached. Archiving to {MILESTONE_REPO}...")
+                token = os.getenv("HF_TOKEN")
+                if not token:
+                    raise RuntimeError("HF_TOKEN is required for milestone archive upload")
+                api = HfApi(token=token)
+                api.create_repo(repo_id=MILESTONE_REPO, repo_type="model", private=True, exist_ok=True)
+                api.upload_file(
+                    path_or_fileobj=str(checkpoint_path),
+                    path_in_repo=f"ray_dit_v3_step_{step:07d}.pt",
+                    repo_id=MILESTONE_REPO,
+                    repo_type="model",
+                )
+                print(f"✅ [milestone] Archived step {step}")
             log_disk_usage(output_dir, prefix=f"[disk] after checkpoint step={step}")
     except (RuntimeError, OSError) as exc:
         print(f"[checkpoint] local save failed at step={step}: {exc}")
