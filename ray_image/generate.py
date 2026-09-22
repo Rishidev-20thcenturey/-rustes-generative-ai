@@ -11,6 +11,8 @@ from .flow import euler_sample
 from .utils import build_models, load_checkpoint, load_pretrained
 from .whiten import LatentNormalizer
 
+DEFAULT_LATENT_STATS = Path(__file__).with_name("latent_stats_corrected.json")
+
 
 def load_models(checkpoint_path, device, vae_checkpoint=None, latent_stats=None):
     checkpoint = load_checkpoint(checkpoint_path, device)
@@ -22,7 +24,7 @@ def load_models(checkpoint_path, device, vae_checkpoint=None, latent_stats=None)
     if vae_checkpoint is not None:
         cfg.latent_channels = 16
         if latent_stats is None:
-            raise ValueError("--latent-stats is required when --vae-checkpoint is provided")
+            latent_stats = DEFAULT_LATENT_STATS
 
         vae_checkpoint_data = load_checkpoint(vae_checkpoint, device)
         vae = build_models(cfg, device, text_encoder=False, dit=False)["vae"]
@@ -60,7 +62,7 @@ def main():
     parser.add_argument("--vae-checkpoint", default=None,
                         help="Optional N6 VAE checkpoint. When provided, generation uses "
                              "the 16-channel N6 VAE instead of the embedded VAE.")
-    parser.add_argument("--latent-stats", default=None,
+    parser.add_argument("--latent-stats", default=str(DEFAULT_LATENT_STATS),
                         help="Optional N6 latent stats JSON. Required with --vae-checkpoint "
                              "for matching 16-channel whitening inversion.")
     parser.add_argument("--prompt", required=True)

@@ -36,8 +36,12 @@ class LatentNormalizer:
 
     @classmethod
     def from_stats_dict(cls, stats):
-        """Build from a probe stats dict (per_channel_mean / per_channel_std)."""
-        return cls(stats["per_channel_mean"], stats["per_channel_std"])
+        """Build from probe stats or the corrected compact means/stds format."""
+        mean = stats.get("per_channel_mean", stats.get("means"))
+        std = stats.get("per_channel_std", stats.get("stds"))
+        if mean is None or std is None:
+            raise KeyError("stats JSON must contain per_channel_mean/per_channel_std or means/stds")
+        return cls(mean, std)
 
     @classmethod
     def from_stats_json(cls, path):
