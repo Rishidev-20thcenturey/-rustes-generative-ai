@@ -62,7 +62,7 @@ class RAYTextEncoder(nn.Module):
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             quantization_config=quantization_config,
-            device_map="auto",
+            device_map={"": 0},
             low_cpu_mem_usage=True,
         )
         self.model.eval()
