@@ -6,7 +6,6 @@ import torch
 from PIL import Image
 
 from .config import RAYConfig
-from .dataset import encode_text
 from .flow import euler_sample
 from .dit_v3 import RAYDiT_v3
 from .utils import build_models, load_checkpoint, load_pretrained
@@ -107,10 +106,10 @@ def main():
         latent_stats=args.latent_stats,
     )
 
-    tokens = encode_text(args.prompt, vocab, cfg.max_tokens).unsqueeze(0).to(device)
-    text_mask = tokens.eq(0)
     with torch.no_grad():
-        text = text_encoder(tokens, mask=text_mask)
+        text, text_mask = text_encoder.encode_texts([args.prompt])
+        text = text.to(device)
+        text_mask = text_mask.to(device)
         latent = euler_sample(
             dit,
             text,
