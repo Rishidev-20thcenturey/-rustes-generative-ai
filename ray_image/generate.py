@@ -80,7 +80,7 @@ def load_models(checkpoint_path, device, vae_checkpoint=None, latent_stats=None)
     for module in (vae, text_encoder, dit):
         module.eval()
 
-    return cfg, checkpoint["vocab"], vae, text_encoder, dit, whiten
+    return cfg, checkpoint.get("vocab", None), vae, text_encoder, dit, whiten
 
 
 def main():
