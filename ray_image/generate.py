@@ -28,7 +28,8 @@ def load_models(checkpoint_path, device, vae_checkpoint=None, latent_stats=None)
 
         vae_checkpoint_data = load_checkpoint(vae_checkpoint, device)
         vae = build_models(cfg, device, text_encoder=False, dit=False)["vae"]
-        load_pretrained({"vae": vae}, vae_checkpoint_data, device)
+        vae_state_dict = vae_checkpoint_data.get("vae", vae_checkpoint_data)
+        load_pretrained({"vae": vae}, {"vae": vae_state_dict}, device)
 
         text_encoder = build_models(cfg, device, vae=False, dit=False)["text_encoder"]
         dit = build_models(cfg, device, vae=False, text_encoder=False)["dit"]
