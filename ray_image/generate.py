@@ -17,7 +17,18 @@ DEFAULT_LATENT_STATS = Path(__file__).with_name("latent_stats_corrected.json")
 def load_models(checkpoint_path, device, vae_checkpoint=None, latent_stats=None):
     checkpoint = load_checkpoint(checkpoint_path, device)
     raw_cfg = checkpoint.get("config", {})
-    cfg = RAYConfig(**{k: v for k, v in raw_cfg.items() if k in RAYConfig.__dataclass_fields__})
+    # Map checkpoint keys to RAYConfig field names
+    mapped_cfg = {}
+    for k, v in raw_cfg.items():
+        if k in RAYConfig.__dataclass_fields__:
+            mapped_cfg[k] = v
+        elif k == "dim" and "model_dim" in RAYConfig.__dataclass_fields__:
+            mapped_cfg["model_dim"] = v
+        elif k == "patch" and "patch_size" in RAYConfig.__dataclass_fields__:
+            mapped_cfg["patch_size"] = v
+        elif k == "text_max_tokens" and "max_tokens" in RAYConfig.__dataclass_fields__:
+            mapped_cfg["max_tokens"] = v
+    cfg = RAYConfig(**mapped_cfg)
 
     # N7 path: use the separately trained N6 VAE and its matching 16-channel
     # latent statistics instead of the VAE embedded in the DiT checkpoint.
