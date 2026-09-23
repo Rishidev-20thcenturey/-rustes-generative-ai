@@ -26,8 +26,13 @@ def load_models(checkpoint_path, device, vae_checkpoint=None, latent_stats=None)
         if latent_stats is None:
             latent_stats = DEFAULT_LATENT_STATS
 
+        from ray_image.vae_v2 import RAYVAE_v2
         vae_checkpoint_data = load_checkpoint(vae_checkpoint, device)
-        vae = build_models(cfg, device, text_encoder=False, dit=False)["vae"]
+        vae_cfg = vae_checkpoint_data.get("config", {})
+        vae = RAYVAE_v2(
+            latent_channels=vae_cfg.get("latent_channels", 16),
+            base_channels=vae_cfg.get("base_channels", 64),
+        )
         vae_state_dict = vae_checkpoint_data.get("vae", vae_checkpoint_data)
         load_pretrained({"vae": vae}, {"vae": vae_state_dict}, device)
 
