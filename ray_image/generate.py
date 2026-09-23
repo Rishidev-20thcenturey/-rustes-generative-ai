@@ -8,6 +8,7 @@ from PIL import Image
 from .config import RAYConfig
 from .flow import euler_sample
 from .dit_v3 import RAYDiT_v3
+from .text_encoder import RAYTextEncoder
 from .utils import build_models, load_checkpoint, load_pretrained
 from .whiten import LatentNormalizer
 
@@ -47,7 +48,11 @@ def load_models(checkpoint_path, device, vae_checkpoint=None, latent_stats=None)
         vae_state_dict = vae_checkpoint_data.get("vae", vae_checkpoint_data)
         load_pretrained({"vae": vae}, {"vae": vae_state_dict}, device)
 
-        text_encoder = build_models(cfg, device, vae=False, dit=False)["text_encoder"]
+        text_encoder = RAYTextEncoder(
+            model_name=RAYTextEncoder.MODEL_ID,
+            max_tokens=cfg.max_tokens,
+            load_in_8bit=True,
+        )
         dit = RAYDiT_v3(
             latent_channels=cfg.latent_channels,
             latent_size=cfg.latent_size,
