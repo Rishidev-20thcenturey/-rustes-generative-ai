@@ -79,20 +79,30 @@ class RAYTextEncoder(nn.Module):
     def input_device(self):
         return next(self.model.parameters()).device
 
-    def tokenize(self, texts, max_length=None):
+    def tokenize(self, texts, max_length=None, pad_to_max=False):
+        """Tokenize a batch.
+
+        ``pad_to_max=False`` (default) pads to the longest sequence in the batch,
+        preserving the existing training behaviour. ``pad_to_max=True`` pads every
+        row to ``max_length`` so cached tensors have a fixed shape (RB-09).
+        """
         max_length = max_length or self.max_tokens
+        if pad_to_max and self.tokenizer.pad_token is None:
+            raise RuntimeError(
+                "pad_to_max=True requires a pad token; the Qwen tokenizer has none set"
+            )
         return self.tokenizer(
             list(texts),
-            padding=True,
+            padding="max_length" if pad_to_max else True,
             truncation=True,
             max_length=max_length,
             return_tensors="pt",
         )
 
     @torch.no_grad()
-    def encode_texts(self, texts, max_length=None):
+    def encode_texts(self, texts, max_length=None, pad_to_max=False):
         """Return (last_hidden_state, padding_mask) for a batch of strings."""
-        encoded = self.tokenize(texts, max_length=max_length)
+        encoded = self.tokenize(texts, max_length=max_length, pad_to_max=pad_to_max)
         encoded = {key: value.to(self.input_device) for key, value in encoded.items()}
         outputs = self.model.model(
             input_ids=encoded["input_ids"],

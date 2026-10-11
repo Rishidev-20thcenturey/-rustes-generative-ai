@@ -8,6 +8,7 @@ rerun resumes from the first missing chunk without recomputing completed ranges.
 import argparse
 import os
 import random
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -102,7 +103,8 @@ def build_chunk(ds_iter, start: int, end: int, batch_size: int, vae: RAYVAE_v2,
     masks = []
     source_seen = 0
     cached = 0
-    skipped = 0
+    # RB-17: skips are counted per reason so a bad chunk is diagnosable.
+    skip_reasons = Counter()
 
     while source_seen < (end - start):
         images = []
@@ -112,14 +114,17 @@ def build_chunk(ds_iter, start: int, end: int, batch_size: int, vae: RAYVAE_v2,
             source_seen += 1
             image = sample.get("thumbnail")
             caption = sample.get("caption_florence-2-large")
-            if image is None or not isinstance(caption, str) or not caption.strip():
-                skipped += 1
+            if image is None:
+                skip_reasons["no_thumbnail"] += 1
+                continue
+            if not isinstance(caption, str) or not caption.strip():
+                skip_reasons["empty_caption"] += 1
                 continue
             try:
                 images.append(preprocess_thumbnail(image))
                 captions.append(caption.strip())
             except (TypeError, ValueError):
-                skipped += 1
+                skip_reasons["preprocess_error"] += 1
 
         if not images:
             continue
@@ -128,9 +133,13 @@ def build_chunk(ds_iter, start: int, end: int, batch_size: int, vae: RAYVAE_v2,
         with torch.inference_mode():
             try:
                 _, z, _, _ = vae(image_batch)
-                text_hidden, mask = text_encoder.encode_texts(captions, max_length=CACHE_TOKENS)
+                # RB-09: pad to max_length so every cached row is exactly
+                # (CACHE_TOKENS, TEXT_DIM) regardless of batch composition.
+                text_hidden, mask = text_encoder.encode_texts(
+                    captions, max_length=CACHE_TOKENS, pad_to_max=True
+                )
             except Exception as exc:
-                skipped += len(images)
+                skip_reasons["encoder_failure"] += len(images)
                 print(f"[skip] encoder batch failure: {exc}")
                 continue
 
@@ -139,15 +148,18 @@ def build_chunk(ds_iter, start: int, end: int, batch_size: int, vae: RAYVAE_v2,
         mask = mask.detach().cpu().bool()
 
         for i in range(z.shape[0]):
-            valid = (
+            if not (
                 torch.isfinite(z[i]).all().item()
                 and torch.isfinite(text_hidden[i]).all().item()
-                and tuple(z[i].shape) == (LATENT_CHANNELS, LATENT_SIZE, LATENT_SIZE)
+            ):
+                skip_reasons["non_finite"] += 1
+                continue
+            if not (
+                tuple(z[i].shape) == (LATENT_CHANNELS, LATENT_SIZE, LATENT_SIZE)
                 and tuple(text_hidden[i].shape) == (CACHE_TOKENS, TEXT_DIM)
                 and tuple(mask[i].shape) == (CACHE_TOKENS,)
-            )
-            if not valid:
-                skipped += 1
+            ):
+                skip_reasons["shape_mismatch"] += 1
                 continue
             latents.append(z[i])
             text_embs.append(text_hidden[i])
@@ -156,7 +168,7 @@ def build_chunk(ds_iter, start: int, end: int, batch_size: int, vae: RAYVAE_v2,
 
         if source_seen % LOG_EVERY == 0 or source_seen >= (end - start):
             absolute = start + source_seen
-            print(f"[progress] chunk={start//1000}k-{end//1000}k source={absolute}/{end} cached={cached} skipped={skipped}")
+            print(f"[progress] chunk={start//1000}k-{end//1000}k source={absolute}/{end} cached={cached} skipped={sum(skip_reasons.values())} {dict(skip_reasons)}")
 
     if not latents:
         raise RuntimeError(f"No valid samples produced for chunk {start}:{end}")
@@ -172,7 +184,8 @@ def build_chunk(ds_iter, start: int, end: int, batch_size: int, vae: RAYVAE_v2,
             "source_end": end,
             "samples_seen": source_seen,
             "samples_cached": cached,
-            "samples_skipped": skipped,
+            "samples_skipped": sum(skip_reasons.values()),
+            "skip_reasons": dict(skip_reasons),
             "latent_dtype": "float16",
             "text_dtype": "float16",
             "latents": torch.stack(latents),
@@ -181,7 +194,10 @@ def build_chunk(ds_iter, start: int, end: int, batch_size: int, vae: RAYVAE_v2,
         },
         output,
     )
-    print(f"[saved] {output} ({output.stat().st_size / (1024 ** 3):.2f} GB) cached={cached} skipped={skipped}")
+    print(
+        f"[saved] {output} ({output.stat().st_size / (1024 ** 3):.2f} GB) cached={cached} "
+        f"skipped={sum(skip_reasons.values())} skip_reasons={dict(skip_reasons)}"
+    )
     return output
 
 
@@ -192,10 +208,23 @@ def main() -> None:
     parser.add_argument("--output-dir", type=str, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--hf-repo", type=str, default=HF_CACHE_REPO)
     parser.add_argument("--no-hf-upload", action="store_true")
+    # RB-06: the chunk window is a CLI argument. The stream skip is derived from
+    # --start-chunk, so any window of the dataset can be built (including 0-5).
+    parser.add_argument("--start-chunk", type=int, default=5,
+                        help="first 10k chunk index to build (chunk N covers samples N*10000..N*10000+9999)")
+    parser.add_argument("--end-chunk", type=int, default=10,
+                        help="exclusive end chunk index to build")
     args = parser.parse_args()
 
     if args.batch_size <= 0:
         raise ValueError("--batch-size must be > 0")
+    if args.start_chunk < 0 or args.end_chunk <= args.start_chunk:
+        raise ValueError("--start-chunk must be >= 0 and --end-chunk must be > --start-chunk")
+    if args.end_chunk * CHUNK_SIZE > TOTAL_SAMPLES:
+        raise ValueError(
+            f"--end-chunk={args.end_chunk} exceeds the {TOTAL_SAMPLES:,}-sample cache budget "
+            f"({TOTAL_SAMPLES // CHUNK_SIZE} chunks)"
+        )
     if not torch.cuda.is_available():
         raise RuntimeError("Qwen/VAE cache precompute requires CUDA")
 
@@ -211,8 +240,11 @@ def main() -> None:
                 "HF_TOKEN is required for resumable cache uploads. "
                 "Use --no-hf-upload only for a local build."
             )
+        # RB-07: honour --hf-repo instead of a hardcoded repository name.
+        # private=True applies at creation only; existing repo visibility is
+        # never modified.
         create_repo(
-            repo_id="Rishix500/monet-qwen-cache-50k",
+            repo_id=args.hf_repo,
             repo_type="dataset",
             exist_ok=True,
             private=True,
@@ -223,9 +255,11 @@ def main() -> None:
     existing_hf = set() if args.no_hf_upload else hf_repo_files(api, args.hf_repo)
     dataset = load_dataset(MONET_REPO, name="parquet", split="train", streaming=True)
 
-    start_chunk = 5
-    end_chunk = 10
-    dataset = dataset.skip(50_000)
+    start_chunk = args.start_chunk
+    end_chunk = args.end_chunk
+    skip = start_chunk * CHUNK_SIZE
+    print(f"[window] chunks {start_chunk}..{end_chunk - 1} (samples {skip:,}..{end_chunk * CHUNK_SIZE:,})")
+    dataset = dataset.skip(skip)
     ds_iter = iter(dataset)
 
     completed = 0

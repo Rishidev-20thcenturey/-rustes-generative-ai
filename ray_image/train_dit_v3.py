@@ -10,6 +10,7 @@ import os
 import random
 import re
 import shutil
+import time
 from pathlib import Path
 
 import numpy as np
@@ -51,6 +52,26 @@ DISK_REFUSE_SAVE_PCT = 90.0
 TRAIN_LR = 5e-5
 GRAD_CLIP = 1.0
 CACHE_CHUNK_RE = re.compile(r"^monet_qwen_cache_(\d+)k_(\d+)k\.pt$")
+
+# RB-03: the latent space this trainer actually optimises in. The v3 trainer
+# feeds raw VAE latents (no channel whitening), so checkpoints declare "raw".
+LATENT_SPACE = "raw"
+
+# RB-11: keys that must match exactly when resuming; anything else warns only.
+GENERATION_CONFIG_KEYS = (
+    "image_size",
+    "latent_channels",
+    "latent_size",
+    "dim",
+    "depth",
+    "heads",
+    "patch",
+    "text_dim",
+)
+
+# RB-03: populated once per process in main() so every checkpoint records which
+# run produced it.
+RUN_ID = None
 
 
 def seed_everything(seed: int) -> None:
@@ -98,7 +119,13 @@ def next_batch(iterator, batch_size: int):
 def _load_cache_payload(path: Path):
     try:
         payload = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
-    except (TypeError, RuntimeError):
+    except (TypeError, RuntimeError) as exc:
+        # RB-12: surface the fallback instead of silently loading a >2 GB file
+        # fully into RAM.
+        print(
+            f"[cache] WARNING: mmap load failed for {path} ({type(exc).__name__}: {exc}); "
+            "falling back to a full in-memory load"
+        )
         payload = torch.load(path, map_location="cpu", weights_only=False)
 
     required = ("latents", "text_emb", "mask")
@@ -132,6 +159,7 @@ def load_cache(path: Path):
     if path.is_file():
         payload = _load_cache_payload(path)
         latents = payload["latents"]
+        payload["text_len"] = int(payload["text_emb"].shape[1])
         print(f"[cache] loaded {path} samples={latents.shape[0]:,} latent={tuple(latents.shape[1:])} text={tuple(payload['text_emb'].shape[1:])}")
         return payload
     if not path.is_dir():
@@ -161,10 +189,19 @@ def load_cache(path: Path):
         previous_end = source_end
         chunks.append(payload)
 
+    text_lengths = {int(payload["text_emb"].shape[1]) for payload in chunks}
+    if len(text_lengths) != 1:
+        raise ValueError(
+            f"cache chunks disagree on text sequence length: {sorted(text_lengths)}; "
+            "rebuild the cache so every chunk shares one length"
+        )
+    text_len = text_lengths.pop()
+
     offsets = [0]
     for payload in chunks:
         offsets.append(offsets[-1] + int(payload["latents"].shape[0]))
-    cache = {"chunks": chunks, "offsets": torch.tensor(offsets, dtype=torch.long), "count": total_samples}
+    cache = {"chunks": chunks, "offsets": torch.tensor(offsets, dtype=torch.long), "count": total_samples,
+             "text_len": text_len}
     print(f"[cache] loaded directory {path} chunks={len(chunks)} total_samples={total_samples:,}")
     print(f"[cache] source ranges verified: {chunks[0].get('source_start', 0)}:{chunks[-1].get('source_end', total_samples)}; no duplicate/overlapping ranges")
     return cache
@@ -182,9 +219,11 @@ def next_cached_batch(cache, batch_size: int, device: torch.device):
     global_indices = torch.randint(0, int(cache["count"]), (batch_size,))
     offsets = cache["offsets"]
     chunk_ids = torch.bucketize(global_indices, offsets[1:-1], right=True)
+    # Sequence length comes from the cache payload, never from a hardcoded value.
+    text_len = int(cache["text_len"])
     clean_latents = torch.empty((batch_size, LATENT_CHANNELS, LATENT_SIZE, LATENT_SIZE), dtype=torch.float32)
-    text_hidden = torch.empty((batch_size, 47, TEXT_DIM), dtype=torch.float16)
-    text_mask = torch.empty((batch_size, 47), dtype=torch.bool)
+    text_hidden = torch.empty((batch_size, text_len, TEXT_DIM), dtype=torch.float16)
+    text_mask = torch.empty((batch_size, text_len), dtype=torch.bool)
     for chunk_id in torch.unique(chunk_ids, sorted=True).tolist():
         positions = torch.nonzero(chunk_ids == chunk_id, as_tuple=False).squeeze(1)
         local_indices = global_indices[positions] - offsets[chunk_id]
@@ -288,6 +327,56 @@ def cleanup_local_checkpoints(output_dir: Path, keep: int = LOCAL_CHECKPOINT_WIN
             print(f"[local cleanup] failed to delete {path}: {exc}")
 
 
+def _generation_config() -> dict:
+    """RB-11: the architecture values a resume must match exactly."""
+    return {
+        "image_size": IMAGE_SIZE,
+        "latent_channels": LATENT_CHANNELS,
+        "latent_size": LATENT_SIZE,
+        "dim": MODEL_DIM,
+        "depth": MODEL_DEPTH,
+        "heads": MODEL_HEADS,
+        "patch": MODEL_PATCH,
+        "text_dim": TEXT_DIM,
+    }
+
+
+def check_resume_config(checkpoint_data, expected=None):
+    """RB-11: raise on an architecture mismatch, warn on missing keys.
+
+    Returns the list of keys that were absent from the checkpoint config.
+    """
+    expected = dict(_generation_config() if expected is None else expected)
+    config = checkpoint_data.get("config")
+    if not isinstance(config, dict):
+        print("[resume] WARNING: checkpoint has no 'config' dict; skipping the consistency check")
+        return []
+
+    mismatches = []
+    missing = []
+    for key, want in expected.items():
+        if key not in config:
+            missing.append(key)
+        elif config[key] != want:
+            mismatches.append(f"{key}: checkpoint={config[key]!r} current={want!r}")
+
+    if mismatches:
+        raise RuntimeError(
+            "[resume] refusing to resume: checkpoint/training config mismatch -> "
+            + "; ".join(mismatches)
+        )
+    if missing:
+        print(f"[resume] WARNING: checkpoint config is missing {missing}; assuming they match")
+    if config.get("latent_space") is None:
+        print("[resume] WARNING: checkpoint does not declare latent_space (pre-RB-03 checkpoint)")
+    elif config.get("latent_space") != LATENT_SPACE:
+        print(
+            f"[resume] WARNING: checkpoint latent_space={config.get('latent_space')!r} "
+            f"but this trainer optimises {LATENT_SPACE!r}"
+        )
+    return missing
+
+
 def _checkpoint_payload(model, optimizer, step, seed):
     return {
         "stage": "dit_v3_n8",
@@ -305,6 +394,13 @@ def _checkpoint_payload(model, optimizer, step, seed):
             "text_max_tokens": TEXT_MAX_TOKENS,
             "cross_gate": True,
             "flow_matching": "linear_gaussian",
+            # RB-03: provenance so a later run (or generate.py) can tell exactly
+            # what this checkpoint was trained against.
+            "latent_space": LATENT_SPACE,
+            "text_cap": TEXT_MAX_TOKENS,
+            "vae_checkpoint": VAE_CHECKPOINT,
+            "torch": torch.__version__,
+            "run": RUN_ID,
         },
         "dit": model.state_dict(),
         "optimizer": optimizer.state_dict(),
@@ -317,7 +413,7 @@ def upload_checkpoint(local_path: Path, repo_id: str) -> None:
         print("[HF] HF_TOKEN not set; keeping checkpoint local only")
         return
     api = HfApi(token=token)
-    api.create_repo(repo_id=repo_id, repo_type="model", exist_ok=True)
+    api.create_repo(repo_id=repo_id, repo_type="model", private=True, exist_ok=True)
     api.upload_file(path_or_fileobj=str(local_path), path_in_repo=local_path.name, repo_id=repo_id, repo_type="model")
     print(f"[HF] uploaded {local_path.name} -> {repo_id}")
     cleanup_hf_checkpoints(api, repo_id)
@@ -333,7 +429,7 @@ def upload_checkpoint_direct(model, optimizer, step: int, seed: int, repo_id: st
     buffer.seek(0)
     filename = f"ray_dit_v3_step_{step:07d}.pt"
     api = HfApi(token=token)
-    api.create_repo(repo_id=repo_id, repo_type="model", exist_ok=True)
+    api.create_repo(repo_id=repo_id, repo_type="model", private=True, exist_ok=True)
     api.upload_file(path_or_fileobj=buffer, path_in_repo=filename, repo_id=repo_id, repo_type="model", commit_message=f"upload DiT v3 checkpoint {filename}")
     print(f"[HF] uploaded {filename} directly from memory (local save skipped)")
     cleanup_hf_checkpoints(api, repo_id)
@@ -357,10 +453,11 @@ def save_checkpoint(path, model, optimizer, step, seed) -> bool:
     return True
 
 
-def load_resume(path, model, optimizer, device) -> int:
+def load_resume(path, model, optimizer, device, expected_config=None) -> int:
     if not path.is_file():
         raise FileNotFoundError(f"resume checkpoint not found: {path}")
     checkpoint_data = torch.load(path, map_location=device, weights_only=False)
+    check_resume_config(checkpoint_data, expected=expected_config)  # RB-11
     model.load_state_dict(checkpoint_data["dit"], strict=True)
     if "optimizer" in checkpoint_data:
         optimizer.load_state_dict(checkpoint_data["optimizer"])
@@ -448,6 +545,8 @@ def main():
         raise ValueError("Use either --resume or --start-step, not both")
     if not torch.cuda.is_available():
         raise RuntimeError("N8 DiT v3 training requires CUDA")
+    global RUN_ID
+    RUN_ID = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-seed{args.seed}"
     seed_everything(args.seed)
     device = torch.device("cuda")
     output_dir = Path(args.output_dir)
@@ -505,6 +604,9 @@ def main():
         t_view = t[:, None, None, None]
         z_t = (1.0 - t_view) * clean_latents + t_view * noise
         target_velocity = noise - clean_latents
+        # RB-13: MSE of a trivial all-zeros predictor = mean(target^2). Logged on
+        # every log line so the training loss can be read against a fixed baseline.
+        zero_pred_mse = float((target_velocity.float() ** 2).mean())
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
             prediction = checkpointed_forward(dit, z_t, t, text_hidden, text_mask)
@@ -516,7 +618,7 @@ def main():
             pbar.set_postfix(loss="nan", lr=f"{current_lr:.1e}")
             if step % LOG_EVERY == 0:
                 vram_gb = torch.cuda.memory_allocated(device) / (1024 ** 3)
-                print(f"step={step} loss=nan grad_norm=nan NaN_skip_count={nan_skip_count} vram_used={vram_gb:.2f}GB")
+                print(f"step={step} loss=nan grad_norm=nan zero_pred_mse={zero_pred_mse:.6f} NaN_skip_count={nan_skip_count} vram_used={vram_gb:.2f}GB")
             continue
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(dit.parameters(), GRAD_CLIP)
@@ -533,7 +635,7 @@ def main():
         if step % LOG_EVERY == 0:
             mean_loss = running_loss / max(running_count, 1)
             vram_gb = torch.cuda.memory_allocated(device) / (1024 ** 3)
-            print(f"step={step} loss={loss.item():.6f} loss_avg={mean_loss:.6f} grad_norm={float(grad_norm):.4f} NaN_skip_count={nan_skip_count} vram_used={vram_gb:.2f}GB")
+            print(f"step={step} loss={loss.item():.6f} loss_avg={mean_loss:.6f} grad_norm={float(grad_norm):.4f} zero_pred_mse={zero_pred_mse:.6f} NaN_skip_count={nan_skip_count} vram_used={vram_gb:.2f}GB")
             running_loss = 0.0
             running_count = 0
         if step % CHECKPOINT_EVERY == 0:

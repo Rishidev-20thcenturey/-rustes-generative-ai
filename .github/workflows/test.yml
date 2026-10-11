@@ -31,3 +31,5 @@ jobs:
         run: python -m ray_image.n4_smoke
       - name: Run N5 gated cross-attention smoke test
         run: python -m ray_image.n5_smoke
+      - name: Run checkpoint provenance / resume smoke test
+        run: python -m ray_image.resume_smoke

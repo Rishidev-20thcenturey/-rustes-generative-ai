@@ -84,7 +84,7 @@ def upload_checkpoint(local_path: Path, repo_id: str, hf_token: str | None):
         print("[HF] HF_TOKEN not set; keeping checkpoint local only")
         return
     api = HfApi(token=hf_token)
-    api.create_repo(repo_id=repo_id, repo_type="model", exist_ok=True)
+    api.create_repo(repo_id=repo_id, repo_type="model", private=True, exist_ok=True)
     api.upload_file(
         path_or_fileobj=str(local_path),
         path_in_repo=local_path.name,

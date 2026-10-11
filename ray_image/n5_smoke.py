@@ -149,16 +149,21 @@ def main():
     assert ck3["config"]["dit_cross_gate"] is True
     print("[6] train_n5 warm-start tiny run saved a gated checkpoint")
 
-    # --- 7: N5 checkpoint loads through the generation path (gated DiT) ---
+    # --- 7: N5 checkpoints are REFUSED by the generation path (RB-04) ---
+    # The legacy N5/N7/N8 stage is known-inconsistent with generate.py
+    # (architecture selection, resolution, latent space), so it must fail loudly
+    # rather than emit a silently wrong image.
     from .generate import load_models as gen_load
-    cfg_r, vocab_r, vae_r, te_r, dit_r, whiten_r = gen_load(str(out), device)
-    assert cfg_r.dit_cross_gate is True
-    assert any(gn in dit_r.state_dict() for gn in gate_names)
-    with torch.no_grad():
-        o_gen = dit_r(z, t, text)
-    assert o_gen.shape == (1, cfg.latent_channels, cfg.latent_size,
-                           cfg.latent_size)
-    print("[7] N5 checkpoint loads through generate.load_models (gated DiT)")
+    try:
+        gen_load(str(out), device)
+    except NotImplementedError as exc:
+        assert "generator_v0.3" in str(exc), exc
+        print("[7] N5 checkpoint correctly refused by generate.load_models (NotImplementedError)")
+    else:
+        raise AssertionError(
+            "generate.load_models accepted an N5 (generator_v0.3) checkpoint; "
+            "RB-04 regression"
+        )
 
     print(f"\nn5_smoke: PASS (artifacts under {tmp})")
 
