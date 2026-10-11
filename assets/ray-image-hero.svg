@@ -1,0 +1,219 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="620" viewBox="0 0 1600 620" role="img" aria-labelledby="title desc">
+  <title id="title">RAY-IMAGE — from-scratch image-generation research</title>
+  <desc id="desc">A dark technical illustration showing the RAY-IMAGE research pipeline: prompt, frozen Qwen text conditioning, flow-matching DiT, latent representation, and VAE decode. The diagram is schematic, not a generated model sample.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#080d1b"/>
+      <stop offset="0.56" stop-color="#10182b"/>
+      <stop offset="1" stop-color="#07151b"/>
+    </linearGradient>
+    <linearGradient id="warm" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffd58a"/>
+      <stop offset="0.48" stop-color="#ff914d"/>
+      <stop offset="1" stop-color="#f65a42"/>
+    </linearGradient>
+    <linearGradient id="cool" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#51ddcb"/>
+      <stop offset="1" stop-color="#65aaff"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#19243a" stop-opacity="0.97"/>
+      <stop offset="1" stop-color="#101a2b" stop-opacity="0.97"/>
+    </linearGradient>
+    <radialGradient id="glowWarm">
+      <stop offset="0" stop-color="#ff8b4b" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#ff8b4b" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowCool">
+      <stop offset="0" stop-color="#56d9d1" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#56d9d1" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#92a6c9" stroke-opacity=".09" stroke-width="1"/>
+    </pattern>
+    <filter id="soft" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="28"/>
+    </filter>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="180%">
+      <feDropShadow dx="0" dy="12" stdDeviation="12" flood-color="#020611" flood-opacity=".38"/>
+    </filter>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6" fill="none" stroke="#6d88ac" stroke-width="1.3"/>
+    </marker>
+  </defs>
+
+  <rect width="1600" height="620" rx="30" fill="url(#bg)"/>
+  <rect width="1600" height="620" rx="30" fill="url(#grid)"/>
+  <ellipse cx="360" cy="130" rx="400" ry="245" fill="url(#glowWarm)"/>
+  <ellipse cx="1310" cy="360" rx="380" ry="300" fill="url(#glowCool)"/>
+  <circle cx="1488" cy="68" r="170" fill="none" stroke="#86a2ca" stroke-opacity=".09"/>
+  <circle cx="1488" cy="68" r="120" fill="none" stroke="#86a2ca" stroke-opacity=".08"/>
+  <path d="M0 530 C290 470 450 640 760 585 S1290 480 1600 540" fill="none" stroke="#7f9ac4" stroke-opacity=".08" stroke-width="1.5"/>
+
+  <g font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <g transform="translate(76 66)">
+      <rect x="0" y="0" width="346" height="34" rx="17" fill="#17253a" stroke="#344761"/>
+      <circle cx="18" cy="17" r="4.5" fill="#63dfcf"/>
+      <text x="32" y="21.5" font-size="11" font-weight="750" letter-spacing="1.65" fill="#b9c8df">FROM-SCRATCH GENERATIVE AI</text>
+    </g>
+
+    <g transform="translate(74 137)">
+      <path d="M0 0H7V7H0Z M12 0H19V7H12Z M0 12H7V19H0Z" fill="url(#warm)"/>
+      <text x="34" y="18" font-size="65" font-weight="850" letter-spacing="-2.7" fill="#f6f8ff">RAY-IMAGE</text>
+      <rect x="0" y="39" width="97" height="5" rx="2.5" fill="url(#warm)"/>
+      <rect x="106" y="39" width="36" height="5" rx="2.5" fill="#61d7cc" opacity=".85"/>
+      <text x="0" y="104" font-size="30" font-weight="680" letter-spacing="-0.6" fill="#ffffff">Build the pipeline.</text>
+      <text x="0" y="145" font-size="30" font-weight="680" letter-spacing="-0.6" fill="#ffffff">Measure every step.</text>
+      <text x="0" y="184" font-size="16.5" fill="#a8b8d1">A from-scratch image-generation research stack</text>
+      <text x="0" y="209" font-size="16.5" fill="#a8b8d1">designed around careful experiments and constrained compute.</text>
+
+      <g transform="translate(0 248)">
+        <rect width="144" height="34" rx="9" fill="#1b293c" stroke="#3c5068"/>
+        <circle cx="14" cy="17" r="3.5" fill="#ffad66"/>
+        <text x="26" y="21" font-size="11.5" font-weight="750" letter-spacing=".7" fill="#e7edf8">CUSTOM VAE</text>
+        <rect x="154" width="167" height="34" rx="9" fill="#1b293c" stroke="#3c5068"/>
+        <circle cx="168" cy="17" r="3.5" fill="#62d9ce"/>
+        <text x="180" y="21" font-size="11.5" font-weight="750" letter-spacing=".55" fill="#e7edf8">FLOW MATCHING</text>
+        <rect x="331" width="222" height="34" rx="9" fill="#1b293c" stroke="#3c5068"/>
+        <circle cx="345" cy="17" r="3.5" fill="#7caeff"/>
+        <text x="357" y="21" font-size="11.5" font-weight="750" letter-spacing=".45" fill="#e7edf8">DiT + TEXT CONDITIONING</text>
+      </g>
+    </g>
+
+    <g transform="translate(770 62)">
+      <rect x="0" y="0" width="754" height="492" rx="23" fill="#0b1220" fill-opacity=".69" stroke="#354660" stroke-opacity=".9"/>
+      <path d="M0 54H754" stroke="#354660" stroke-opacity=".65"/>
+      <circle cx="25" cy="27" r="4" fill="#ff9659"/>
+      <circle cx="40" cy="27" r="4" fill="#f2c36c"/>
+      <circle cx="55" cy="27" r="4" fill="#60dcca"/>
+      <text x="75" y="31" font-size="11.5" font-weight="750" letter-spacing="1.4" fill="#c7d3e8">RESEARCH PIPELINE</text>
+      <text x="725" y="31" text-anchor="end" font-size="10.5" font-weight="700" letter-spacing="1.1" fill="#7590b2">SCHEMATIC · NOT A MODEL SAMPLE</text>
+
+      <g filter="url(#shadow)">
+        <rect x="29" y="86" width="145" height="110" rx="14" fill="url(#card)" stroke="#4a5d78"/>
+        <rect x="43" y="100" width="27" height="27" rx="7" fill="#38283a" stroke="#9b6e5d"/>
+        <path d="M51 108H62 M51 113H59 M51 118H62" stroke="#ffb46d" stroke-width="1.8" stroke-linecap="round"/>
+        <text x="43" y="148" font-size="10" font-weight="750" letter-spacing="1.2" fill="#ffb47b">01 / INPUT</text>
+        <text x="43" y="169" font-size="15" font-weight="720" fill="#f0f4ff">Text prompt</text>
+        <text x="43" y="185" font-size="10.5" fill="#97a9c5">Natural language</text>
+
+        <rect x="202" y="86" width="160" height="110" rx="14" fill="url(#card)" stroke="#4a5d78"/>
+        <rect x="217" y="100" width="25" height="27" rx="7" fill="#173b42" stroke="#3c8e8f"/>
+        <g stroke="#6de1d3" stroke-width="2" stroke-linecap="round">
+          <path d="M224 107H235 M224 113H232 M224 119H236"/>
+        </g>
+        <text x="217" y="148" font-size="10" font-weight="750" letter-spacing="1.2" fill="#70ded2">02 / CONDITION</text>
+        <text x="217" y="169" font-size="15" font-weight="720" fill="#f0f4ff">Qwen3-4B</text>
+        <text x="217" y="185" font-size="10.5" fill="#97a9c5">Frozen text encoder</text>
+
+        <rect x="390" y="86" width="164" height="110" rx="14" fill="url(#card)" stroke="#4a5d78"/>
+        <text x="405" y="111" font-size="10" font-weight="750" letter-spacing="1.1" fill="#8bb8ff">03 / CONTEXT</text>
+        <g transform="translate(405 123)">
+          <rect width="8" height="24" rx="3" fill="#65d9ce"/>
+          <rect x="13" y="4" width="8" height="20" rx="3" fill="#83b5ff"/>
+          <rect x="26" y="1" width="8" height="23" rx="3" fill="#e8a4b9"/>
+          <rect x="39" y="7" width="8" height="17" rx="3" fill="#ffb16f"/>
+          <rect x="52" y="2" width="8" height="22" rx="3" fill="#7e9bff"/>
+          <rect x="65" y="6" width="8" height="18" rx="3" fill="#69d6bd"/>
+          <rect x="78" y="3" width="8" height="21" rx="3" fill="#d49aff"/>
+          <rect x="91" y="8" width="8" height="16" rx="3" fill="#e1c578"/>
+          <rect x="104" y="2" width="8" height="22" rx="3" fill="#7e9bff"/>
+          <rect x="117" y="5" width="8" height="19" rx="3" fill="#69d6bd"/>
+        </g>
+        <text x="405" y="169" font-size="13.5" font-weight="720" fill="#f0f4ff">Token embeddings</text>
+        <text x="405" y="185" font-size="10.5" fill="#97a9c5">Hidden size 2,560</text>
+
+        <rect x="582" y="76" width="143" height="132" rx="15" fill="#18263a" stroke="#ff9a63" stroke-opacity=".78" stroke-width="1.2"/>
+        <rect x="597" y="90" width="28" height="28" rx="7" fill="#48302b" stroke="#bb7554"/>
+        <g fill="#ffb27a">
+          <rect x="604" y="97" width="4" height="14" rx="1"/>
+          <rect x="611" y="97" width="4" height="14" rx="1" opacity=".8"/>
+        </g>
+        <text x="597" y="140" font-size="10" font-weight="750" letter-spacing="1.05" fill="#ffb47b">04 / GENERATE</text>
+        <text x="597" y="162" font-size="17" font-weight="760" fill="#ffffff">DiT</text>
+        <text x="597" y="179" font-size="11.5" fill="#b7c5dc">Flow matching</text>
+        <text x="597" y="194" font-size="10.5" fill="#8fa4c2">Velocity prediction</text>
+      </g>
+
+      <g stroke="#718bad" stroke-width="1.5" fill="none" marker-end="url(#arrow)">
+        <path d="M174 141H198"/>
+        <path d="M362 141H386"/>
+        <path d="M554 141H577"/>
+      </g>
+
+      <path d="M652 208V247" fill="none" stroke="#ff9865" stroke-width="1.6" stroke-dasharray="4 5" marker-end="url(#arrow)"/>
+      <text x="670" y="232" font-size="9.5" font-weight="700" letter-spacing=".8" fill="#dca17f">SAMPLE</text>
+
+      <g filter="url(#shadow)">
+        <rect x="563" y="265" width="162" height="142" rx="14" fill="url(#card)" stroke="#4a5d78"/>
+        <text x="578" y="289" font-size="10" font-weight="750" letter-spacing="1.1" fill="#8bb8ff">05 / LATENT</text>
+        <g transform="translate(583 300)">
+          <rect width="16" height="16" rx="3" fill="#f0a268"/>
+          <rect x="20" width="16" height="16" rx="3" fill="#dc8a82"/>
+          <rect x="40" width="16" height="16" rx="3" fill="#836ec2"/>
+          <rect x="60" width="16" height="16" rx="3" fill="#5ba7b7"/>
+          <rect x="80" width="16" height="16" rx="3" fill="#66bdb2"/>
+          <rect y="20" width="16" height="16" rx="3" fill="#c58ca5"/>
+          <rect x="20" y="20" width="16" height="16" rx="3" fill="#647fbf"/>
+          <rect x="40" y="20" width="16" height="16" rx="3" fill="#e1b06e"/>
+          <rect x="60" y="20" width="16" height="16" rx="3" fill="#8c78cd"/>
+          <rect x="80" y="20" width="16" height="16" rx="3" fill="#df8870"/>
+          <rect y="40" width="16" height="16" rx="3" fill="#68bfb7"/>
+          <rect x="20" y="40" width="16" height="16" rx="3" fill="#d99a73"/>
+          <rect x="40" y="40" width="16" height="16" rx="3" fill="#6786c9"/>
+          <rect x="60" y="40" width="16" height="16" rx="3" fill="#ca8ab3"/>
+          <rect x="80" y="40" width="16" height="16" rx="3" fill="#69a7a2"/>
+          <rect y="60" width="16" height="16" rx="3" fill="#8475c1"/>
+          <rect x="20" y="60" width="16" height="16" rx="3" fill="#e0ab73"/>
+          <rect x="40" y="60" width="16" height="16" rx="3" fill="#6cbbb4"/>
+          <rect x="60" y="60" width="16" height="16" rx="3" fill="#d8877c"/>
+          <rect x="80" y="60" width="16" height="16" rx="3" fill="#748cc5"/>
+        </g>
+        <text x="578" y="397" font-size="10.5" fill="#9daec8">16 × 32 × 32 tensor</text>
+
+        <rect x="342" y="265" width="180" height="142" rx="14" fill="url(#card)" stroke="#4a5d78"/>
+        <text x="358" y="289" font-size="10" font-weight="750" letter-spacing="1.1" fill="#70ded2">06 / DECODE</text>
+        <g transform="translate(358 305)">
+          <rect width="36" height="36" rx="8" fill="#193b43" stroke="#3d8786"/>
+          <path d="M9 10H27 M9 17H27 M9 24H27" stroke="#6fe2d4" stroke-width="2" stroke-linecap="round"/>
+        </g>
+        <text x="405" y="317" font-size="15" font-weight="730" fill="#f0f4ff">Custom VAE</text>
+        <text x="405" y="336" font-size="11" fill="#9db0cb">16-channel</text>
+        <text x="358" y="369" font-size="10.5" fill="#9daec8">Decode latent → RGB</text>
+        <rect x="358" y="383" width="147" height="7" rx="3.5" fill="#263950"/>
+        <rect x="358" y="383" width="92" height="7" rx="3.5" fill="url(#cool)"/>
+
+        <rect x="29" y="265" width="282" height="142" rx="14" fill="url(#card)" stroke="#4a5d78"/>
+        <text x="45" y="289" font-size="10" font-weight="750" letter-spacing="1.1" fill="#ffb47b">07 / RECONSTRUCTION SPACE</text>
+        <g transform="translate(45 302)">
+          <rect width="74" height="74" rx="9" fill="#172842" stroke="#455d7a"/>
+          <circle cx="55" cy="18" r="8" fill="#ffbb70"/>
+          <path d="M4 57L24 34L40 48L53 37L70 58V70H4Z" fill="#58a8a1"/>
+          <path d="M4 64L26 47L43 57L57 45L70 58V70H4Z" fill="#2d747b"/>
+          <path d="M5 12H27 M5 18H20" stroke="#89a5c7" stroke-opacity=".65" stroke-width="2" stroke-linecap="round"/>
+        </g>
+        <text x="133" y="324" font-size="15" font-weight="730" fill="#f0f4ff">256 × 256</text>
+        <text x="133" y="344" font-size="11.5" fill="#a8bad3">RGB image target</text>
+        <text x="133" y="367" font-size="10.5" fill="#7992b3">Illustrative diagram only.</text>
+        <text x="133" y="382" font-size="10.5" fill="#7992b3">Not a generated result.</text>
+      </g>
+      <g stroke="#718bad" stroke-width="1.5" fill="none" marker-end="url(#arrow)">
+        <path d="M563 338H526"/>
+        <path d="M342 338H315"/>
+      </g>
+
+      <g transform="translate(29 435)">
+        <rect width="696" height="34" rx="9" fill="#101d2e" stroke="#344961"/>
+        <circle cx="17" cy="17" r="3.5" fill="#62d9ce"/>
+        <text x="30" y="21" font-size="10.5" font-weight="700" letter-spacing=".45" fill="#b5c6df">DIAGNOSE BEFORE YOU TRAIN</text>
+        <path d="M271 10V24" stroke="#344961"/>
+        <text x="289" y="21" font-size="10.5" font-weight="650" letter-spacing=".3" fill="#9eb1cb">CHECKPOINT PROVENANCE</text>
+        <path d="M490 10V24" stroke="#344961"/>
+        <text x="507" y="21" font-size="10.5" font-weight="650" letter-spacing=".3" fill="#9eb1cb">REPRODUCIBLE SMOKE TESTS</text>
+      </g>
+    </g>
+    <text x="76" y="586" font-size="10.5" font-weight="650" letter-spacing="1.15" fill="#7287a7">RAY-IMAGE / ENGINEERING NOTEBOOK</text>
+    <text x="1525" y="586" text-anchor="end" font-size="10.5" font-weight="650" letter-spacing="1.15" fill="#7287a7">RESEARCH PREVIEW · NOT A RELEASE CLAIM</text>
+  </g>
+</svg>
