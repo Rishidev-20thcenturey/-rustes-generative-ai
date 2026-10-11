@@ -14,9 +14,92 @@ from .whiten import LatentNormalizer
 
 DEFAULT_LATENT_STATS = Path(__file__).with_name("latent_stats_corrected.json")
 
+# Legacy generator stages that must never be silently served by this script.
+UNSUPPORTED_STAGE_PREFIX = "generator_v0.3"
+
+
+def assert_supported_stage(checkpoint) -> None:
+    """RB-04: refuse to generate from the legacy N5/N7/N8 generator stages.
+
+    Those checkpoints are known-inconsistent with this loader (architecture
+    selection, resolution and latent-space assumptions), so producing an image
+    from them would be silently wrong. Fail loudly instead.
+    """
+    stage = checkpoint.get("stage")
+    if isinstance(stage, str) and stage.startswith(UNSUPPORTED_STAGE_PREFIX):
+        raise NotImplementedError(
+            f"generation from stage={stage!r} is not supported: the legacy N5/N7/N8 "
+            "generator path (train_n5.py) is inconsistent with this loader "
+            "(architecture/flags/latent-space). Train with train_dit_v2.py or "
+            "train_dit_v3.py, or extend generate.py before serving these weights."
+        )
+
+
+def resolve_whitening(checkpoint, latent_stats=None):
+    """RB-01/RB-02: apply un-whitening ONLY when the checkpoint carries it.
+
+    ``--latent-stats`` is no longer an implicit default; it is an optional
+    *consistency check* against the checkpoint's own whitening state. Failing
+    cases raise ``ValueError``:
+      * stats were supplied but the checkpoint has no ``whiten`` state;
+      * stats disagree with the checkpoint's ``whiten`` state;
+      * the checkpoint stores ``whiten`` but declares ``latent_space == "raw"``.
+    Returns a ``LatentNormalizer`` or ``None``.
+    """
+    state = checkpoint.get("whiten")
+    config = checkpoint.get("config") or {}
+    declared = config.get("latent_space") if isinstance(config, dict) else None
+
+    stats = None
+    if latent_stats is not None:
+        stats = LatentNormalizer.from_stats_json(latent_stats)
+
+    if state is None:
+        if stats is not None:
+            raise ValueError(
+                f"--latent-stats {latent_stats} was supplied but the checkpoint has no "
+                "'whiten' state; refusing to apply an un-verifiable transform"
+            )
+        if declared == "whitened":
+            raise ValueError(
+                "checkpoint config declares latent_space='whitened' but stores no "
+                "'whiten' state; the checkpoint is inconsistent"
+            )
+        return None
+
+    if declared == "raw":
+        raise ValueError(
+            "checkpoint stores 'whiten' state but its config declares "
+            "latent_space='raw'; the checkpoint is inconsistent"
+        )
+
+    if isinstance(state, dict) and "mean" in state and "std" in state:
+        normalizer = LatentNormalizer.from_state(state)
+    else:
+        normalizer = LatentNormalizer.from_stats_dict(state)
+
+    if stats is not None:
+        if normalizer.channels != stats.channels:
+            raise ValueError(
+                f"--latent-stats has {stats.channels} channels but the checkpoint's "
+                f"whitening state has {normalizer.channels}"
+            )
+        import torch as _torch
+
+        same_mean = _torch.allclose(normalizer.mean, stats.mean.to(normalizer.mean.dtype), rtol=1e-4, atol=1e-6)
+        same_std = _torch.allclose(normalizer.std, stats.std.to(normalizer.std.dtype), rtol=1e-4, atol=1e-6)
+        if not (same_mean and same_std):
+            raise ValueError(
+                f"--latent-stats {latent_stats} does not match the checkpoint's stored "
+                "whitening state; refusing to guess which one is correct"
+            )
+    return normalizer
+
+
 
 def load_models(checkpoint_path, device, vae_checkpoint=None, latent_stats=None):
     checkpoint = load_checkpoint(checkpoint_path, device)
+    assert_supported_stage(checkpoint)  # RB-04
     raw_cfg = checkpoint.get("config", {})
     # Map checkpoint keys to RAYConfig field names
     mapped_cfg = {}
@@ -35,8 +118,6 @@ def load_models(checkpoint_path, device, vae_checkpoint=None, latent_stats=None)
     # latent statistics instead of the VAE embedded in the DiT checkpoint.
     if vae_checkpoint is not None:
         cfg.latent_channels = 16
-        if latent_stats is None:
-            latent_stats = DEFAULT_LATENT_STATS
 
         from ray_image.vae_v2 import RAYVAE_v2
         vae_checkpoint_data = load_checkpoint(vae_checkpoint, device)
@@ -65,8 +146,11 @@ def load_models(checkpoint_path, device, vae_checkpoint=None, latent_stats=None)
         ).to(device)
         load_pretrained({"text_encoder": text_encoder, "dit": dit}, checkpoint, device)
 
-        whiten = LatentNormalizer.from_stats_json(latent_stats)
-        whiten.validate_channels(16)
+        # RB-01/RB-02: un-whitening is driven by the checkpoint, never by an
+        # implicit default. --latent-stats only verifies the checkpoint's state.
+        whiten = resolve_whitening(checkpoint, latent_stats)
+        if whiten is not None:
+            whiten.validate_channels(16)
     else:
         # Legacy path: load the VAE, text encoder, DiT, and whitening state from
         # the generator checkpoint exactly as before (including 4-channel N5).
@@ -76,9 +160,8 @@ def load_models(checkpoint_path, device, vae_checkpoint=None, latent_stats=None)
         text_encoder = modules["text_encoder"]
         dit = modules["dit"]
 
-        whiten = None
-        if checkpoint.get("whiten") is not None:
-            whiten = LatentNormalizer.from_state(checkpoint["whiten"])
+        whiten = resolve_whitening(checkpoint, latent_stats)
+        if whiten is not None:
             whiten.validate_channels(cfg.latent_channels)
 
     for module in (vae, text_encoder, dit):
@@ -93,9 +176,11 @@ def main():
     parser.add_argument("--vae-checkpoint", default=None,
                         help="Optional N6 VAE checkpoint. When provided, generation uses "
                              "the 16-channel N6 VAE instead of the embedded VAE.")
-    parser.add_argument("--latent-stats", default=str(DEFAULT_LATENT_STATS),
-                        help="Optional N6 latent stats JSON. Required with --vae-checkpoint "
-                             "for matching 16-channel whitening inversion.")
+    parser.add_argument("--latent-stats", default=None,
+                        help="Optional latent-stats JSON used ONLY as a consistency check "
+                             "against the checkpoint's own whitening state. Un-whitening is "
+                             f"applied only when the checkpoint stores it (suggested: "
+                             f"{DEFAULT_LATENT_STATS}).")
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--output", default="generated.png")
     parser.add_argument("--steps", type=int, default=40)
@@ -123,8 +208,8 @@ def main():
             device=device,
             text_mask=text_mask,
         )
-        # The sampler operates in whitened space when the checkpoint was trained
-        # with whitening; invert (z = z_norm*std + mean) before decoding.
+        # Un-whitening is applied only when the checkpoint stores whitening state
+        # (see resolve_whitening); otherwise the sampler output is decoded as-is.
         if whiten is not None:
             latent = whiten.denormalize(latent)
         image = vae.decode(latent).clamp(0, 1)[0]

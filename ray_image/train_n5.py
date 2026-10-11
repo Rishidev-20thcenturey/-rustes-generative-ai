@@ -68,15 +68,23 @@ def build_n5_from_n2(n2_checkpoint: str, device, cfg=None):
     return cfg, vocab, vae, text_encoder, dit, whiten, new_params, loaded
 
 
-def build_n7_from_n6(n6_vae_checkpoint, latent_stats, device, n2_checkpoint=None):
+def build_n7_from_n6(n6_vae_checkpoint, latent_stats, device, n2_checkpoint=None,
+                     image_size=None):
     """Build a 16-channel N7/N8 generator around a frozen N6 VAE.
 
     The N8 path always uses Qwen3-4B for text conditioning. If an old N2
     checkpoint is supplied, only shape-compatible DiT weights are reused;
     the legacy toy text encoder is not loaded into the Qwen encoder.
+
+    RB-05: ``image_size`` must match the resolution the VAE was trained at
+    (256 for RAYVAE_v2). ``latent_size`` is derived from it by ``RAYConfig``.
     """
     n2 = load_checkpoint(n2_checkpoint, device) if n2_checkpoint else None
     cfg = config_from_checkpoint(n2.get("config", {})) if n2 is not None else RAYConfig()
+    if image_size is not None:
+        if image_size % 8 != 0:
+            raise ValueError(f"--image-size must be divisible by 8, got {image_size}")
+        cfg.image_size = image_size
     cfg.latent_channels = 16
     cfg.dit_cross_gate = True
     cfg.text_encoder_backend = "qwen3"
@@ -199,6 +207,9 @@ def main():
                         help="N6 VAE checkpoint (.pt); selects the 16-channel N8/Qwen3 path.")
     parser.add_argument("--latent-stats", default=None,
                         help="N6 latent stats JSON; required with --vae-checkpoint.")
+    parser.add_argument("--image-size", type=int, default=None,
+                        help="Training resolution. RB-05: required with --vae-checkpoint "
+                             "(256 for RAYVAE_v2); latent_size = image_size // 8.")
     parser.add_argument("--steps", type=int, default=8000)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=2e-4)
@@ -211,10 +222,17 @@ def main():
     if args.vae_checkpoint:
         if not args.latent_stats:
             parser.error("--latent-stats is required when --vae-checkpoint is provided")
+        if args.image_size is None:
+            parser.error(
+                "--image-size is required when --vae-checkpoint is provided "
+                "(the VAE was trained at a fixed resolution; 256 for RAYVAE_v2)"
+            )
         cfg, vocab, vae, text_encoder, dit, whiten, loaded = build_n7_from_n6(
-            args.vae_checkpoint, args.latent_stats, device, args.checkpoint
+            args.vae_checkpoint, args.latent_stats, device, args.checkpoint,
+            image_size=args.image_size,
         )
         print(f"[N8] device={device} n6_vae={args.vae_checkpoint}")
+        print(f"[N8] image_size={cfg.image_size} latent_size={cfg.latent_size}")
         print(f"[N8] latent_channels={cfg.latent_channels}; text_dim={cfg.text_dim}; backend=Qwen3-4B")
         print(f"[N8] warmstart={args.checkpoint or 'none'}")
         if args.checkpoint:
@@ -224,6 +242,12 @@ def main():
     else:
         if not args.checkpoint:
             parser.error("--checkpoint is required unless --vae-checkpoint is provided")
+        if args.image_size is not None:
+            print(f"[N5] WARNING: --image-size={args.image_size} is ignored on the legacy "
+                  "N5 path; the resolution comes from the N2 checkpoint config")
+        else:
+            print("[N5] WARNING: --image-size not passed; the N2 checkpoint's resolution "
+                  "is inherited (only meaningful on the --vae-checkpoint path)")
         cfg, vocab, vae, text_encoder, dit, whiten, new_params, loaded = \
             build_n5_from_n2(args.checkpoint, device)
         print(f"[N5] device={device} warmstart={args.checkpoint}")
