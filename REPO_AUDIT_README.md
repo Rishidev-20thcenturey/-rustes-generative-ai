@@ -21,6 +21,8 @@
 
 > **Post-audit addendum (2026-10-11, owner request).** After the audit window closed, the owner instructed that this report be moved into the repository. It has therefore been placed at the repository root (`REPO_AUDIT_README.md`) and committed on the session branch `arena/fe783906-rustes-generative-ai`. Its contents are unchanged apart from this note. Every integrity statement in §6.4 and in the final response remains accurate for the audit window (08:12–08:18 UTC); the only repository change after that window is the addition of this file, made by the owner's explicit instruction, not by the audit itself. Nothing in §9–§11 (remediation, tests, checklist) has been implemented — all findings remain open.
 
+> **Second addendum (2026-10-11, same day, owner instruction).** A second pass over the three trainers produced five further findings, **RAY-035 … RAY-039**. They are now part of this report: the priority table (§4.1), a new detail subsection (§4.3), the category analyses (§5.1, §5.5) and the fix-tracking checklist (§11). The finding total is therefore **39 (RAY-001 … RAY-039)**. Two statements above are superseded by later events: (a) "the only repository change after that window is the addition of this file" — this second addendum itself changes the file; and (b) "Nothing in §9–§11 … has been implemented" — after this report was delivered, the owner opened a follow-up remediation task, and the 17 items it defined (**RB-01 … RB-17**: latent-space/whitening wiring, refusal of the legacy N5/N7/N8 stage, HF repositories created private, checkpoint provenance keys, resume-config validation, zero-prediction baseline logging, cache chunk range and repo selection, text padding, mmap-fallback warning, per-reason skip accounting, an image-size guard, and a new CPU resume smoke test) are implemented on the session branch and proposed in PR #6. That implementation is the owner's work, not this audit's; this report records it here only so the two documents do not contradict each other. Findings **RAY-035 … RAY-039** were found by reading the **audited** tree, so their citations are to commit `7b73c86`; where the RB work has since touched the same code, the entry says so.
+
 ---
 
 ## 1. Audit scope
@@ -182,6 +184,11 @@ Classification: **Confirmed Bug** · **Probable Bug** · **Potential Risk** · *
 | **RAY-032** | ⚪ Info | Potential Risk | Kaggle notebook committed with 94 stale outputs (334 KB) including private slugs and Drive paths | `notebook9e7e01df92.ipynb` |
 | **RAY-033** | ⚪ Info | Improvement | Repository contains an unrelated, fully-reverted TypeScript backend in two surviving stale branches; 4 low-value commits (`tmp`, `tmp2`, `temp`) | branches `arena/0d90ac7c…`, `revert/food-backend…`; commits `1ad6bf29`, `87f4fa32`, `f612d55b`, `fd93bb87` |
 | **RAY-034** | ⚪ Info | Improvement | `--latent-stats` documented "Optional/Required" but effectively always applied | `ray_image/generate.py:96-98,128-129` |
+| **RAY-035** | 🟡 Medium | Probable Bug | `next_batch` skips unreadable rows **silently and without bound** in all three trainers (no counter, no log, no attempt cap) | `ray_image/train_dit_v3.py:83-95`; `train_dit_v2.py:88-103`; `train_vae_v2.py:67-79` |
+| **RAY-036** | 🟡 Medium | Confirmed Bug | The 10 000-step milestone archive is reachable **only on the happy path** — both fallbacks (disk-pressure, exception) bypass it | `ray_image/train_dit_v3.py:384-393,401-414,416-429` |
+| **RAY-037** | 🟡 Medium | Potential Risk | Default `--output-dir` is container-local scratch (`/kaggle/tmp/checkpoints`), while the other two trainers default to `/kaggle/working/…` | `ray_image/train_dit_v3.py:49,441` vs `train_dit_v2.py:344`, `train_vae_v2.py:129` |
+| **RAY-038** | 🟢 Low | Potential Risk | Milestone repo has **no retention rule**: ≈1.03 GB per 10 000 steps ≈ 20.7 GB for a 200k run, every file also duplicated in the main repo | `ray_image/train_dit_v3.py:33-34,401-414`; `cleanup_hf_checkpoints` `:256-267` is called only for the main repo (`:323,339`) |
+| **RAY-039** | 🟢 Low | Confirmed Bug | `train_vae_v2.py` re-saves and re-uploads the final checkpoint whenever `--steps` is a multiple of 500 — the guard compares a variable that is never updated | `ray_image/train_vae_v2.py:168,183,252-265,268-273` |
 
 ### 4.2 High-severity findings in detail
 
@@ -326,6 +333,103 @@ With `padding=True`, a cache row has length `L = min(47, longest caption in that
 
 ---
 
+### 4.3 Supplementary findings in detail (second-pass review, added 2026-10-11)
+
+All five were found by re-reading the three N8 trainers in the **audited** tree; every citation is to commit `7b73c86`.
+
+---
+
+#### RAY-035 — `next_batch` skips unreadable rows silently and without bound in all three trainers
+**Severity:** Medium (diagnosability + data accounting) · **Classification:** Probable Bug · **Confidence:** High that the code behaves as described (it is unambiguous); the *magnitude* needs one measurement (the invalid-row rate of the stream)
+
+**Files/lines** (audited commit `7b73c86`)
+* `ray_image/train_dit_v3.py:83-95` — the whole batch builder: `while len(images) < batch_size:` (85), `sample = next(iterator)` (86), `if image is None: continue` (88-89), `except (TypeError, ValueError): continue` (93-94), and its two call sites `:491-495` (with a `StopIteration` → rebuild-iterator retry)
+* `ray_image/train_dit_v2.py:88-103` — the same structure verbatim, call site `:419-423`
+* `ray_image/train_vae_v2.py:67-79` — the same structure without captions, call site `:199-203`
+* `ray_image/train_dit_v3.py:90-94` puts `preprocess_thumbnail(image)` **and** `_pick_caption(sample)` inside the same `try`, so a caption-selection failure silently discards an image that was otherwise fine.
+
+**Consequence**
+* **Uncounted skips.** Nothing counts them: no per-reason counter, no log line, no `[progress]`-style report (contrast the cache builder, which after the owner's RB-17 fix does count skips per reason). A run that skipped 40 % of the stream writes exactly the same log as one that skipped none. "Step 100 000 of 200 000" therefore no longer implies "1.6 M images consumed" (batch 8) — the denominator of every progress claim becomes unknown.
+* **Unbounded inner loop.** The `while` has no attempt cap. If the remaining stream is systematically unreadable — e.g. a MONET schema change makes `thumbnail` always `None`, or `preprocess_thumbnail` starts raising — the loop drains the *entire* stream at network speed producing nothing, hits `StopIteration`, and the caller's retry (`:493-495`, `train_dit_v2.py:421-423`, `train_vae_v2.py:201-203`) **rebuilds the iterator from the start and drains it again**. The observable symptom is a frozen progress bar with a live network, forever — not a crash, not a message.
+* **Bias is silent.** Because `None`-thumbnail rows and unreadable rows are dropped with the same anonymous `continue`, an image/caption quality regression cannot be distinguished from a benign missing-thumbnail gap.
+
+**Recommended future fix (same pattern now used in `precompute_qwen_cache.py` after RB-17):** count skips per reason, print the counts periodically and at the end; log `rows_consumed / images_yielded` so the effective dataset size is visible; split the `try` so caption failures do not discard good images; bound the retry loop and raise a named error instead of draining indefinitely.
+
+**Regression risk:** low — counters and a bounded loop do not change which samples are used.
+**Safe test:** feed a synthetic iterator of 100 rows (50 × `None` thumbnail, 10 × raising preprocess, 40 valid) and assert the returned tensors, the exact per-reason counts, and that a fully-invalid stream raises a named error within a bounded number of attempts rather than spinning.
+
+---
+
+#### RAY-036 — The milestone archive exists only on the happy path
+**Severity:** Medium · **Classification:** Confirmed Bug · **Confidence:** Certain
+
+**Files/lines** (audited commit `7b73c86`)
+* `ray_image/train_dit_v3.py:401-414` — the milestone block (`if step > 0 and step % MILESTONE_INTERVAL == 0:`, interval 10 000 from `:34`) lives **inside** the `if save_checkpoint(...)` branch of the `try:` opened at `:395`
+* `:384-393` — the disk-pressure branch (`local_disk_pct >= DISK_REFUSE_SAVE_PCT`) returns after `upload_checkpoint_direct(...)` (`:392-393`) **before** the `try` — no archive
+* `:416-429` — the `except (RuntimeError, OSError)` fallback also re-uploads directly and returns **without** archiving
+* `:403-405` — the archive raises `RuntimeError` when `HF_TOKEN` is missing, and that raise is caught by the surrounding `except` at `:416`, whose message then reads "local save failed at step=…" (`:417`) — so a milestone-token failure is mislabelled as a local-save failure.
+
+**Consequence:** the milestone repo is the *durable* per-10 000-step record (the main repo is pruned to a rolling 4-file window, RAY-038). The two situations that most need it — a full local disk and a transient upload/exception — are exactly the two that skip it. A run that spends its late phase above the 90 % threshold can therefore end with **no milestone archive for those boundaries and only the rolling 4-file window** on the main repo: at 200 000 steps the durable record degrades to the last four checkpoints.
+
+**Recommended future fix:** move the milestone block out of the local-save success branch (archive after either save path), or archive in a `finally`-style helper invoked by all three paths; keep `HF_TOKEN` validation outside the block that the generic `except` mislabels.
+
+**Regression risk:** low — the archive is additive; the only behavioural change is *more* files uploaded.
+**Safe test:** call `save_or_upload_checkpoint` three times with a mocked `HfApi` and a stubbed `save_checkpoint` — happy path, `DISK_REFUSE_SAVE_PCT` exceeded, and a raising save — with `step % MILESTONE_INTERVAL == 0`, and assert that all three produce a milestone upload.
+
+---
+
+#### RAY-037 — The default checkpoint directory is container-local scratch
+**Severity:** Medium · **Classification:** Potential Risk · **Confidence:** High that the default path is as cited; the durability claim below is inference and is flagged as such
+
+**Files/lines** (audited commit `7b73c86`)
+* `ray_image/train_dit_v3.py:49` — `LOCAL_CHECKPOINT_DIR = "/kaggle/tmp/checkpoints"`; `:441` — `--output-dir` defaults to it
+* Contrast: `ray_image/train_dit_v2.py:344` defaults to `/kaggle/working/ray_image_dit_n8_v2`; `ray_image/train_vae_v2.py:129` to `/kaggle/working/ray_image_vae_n8`
+* `ray_image/train_dit_v3.py:314-317` — with no `HF_TOKEN` in the environment, `upload_checkpoint` prints "[HF] HF_TOKEN not set; keeping checkpoint local only" and returns
+
+**Consequence:** with `--no-hf-upload`, or simply with an unset `HF_TOKEN`, the only copy of a 200 000-step run is written under `/kaggle/tmp/…`, which is the v3 trainer's *default* — while the two older trainers default to `/kaggle/working`. *Inference (not verified in this audit — I could not inspect Kaggle's current filesystem policy):* `/kaggle/working` is the path Kaggle persists as notebook output, whereas `/kaggle/tmp` is session-local scratch. Under that reading, the newest trainer has the least durable default, and the failure is silent (the run completes; the files vanish with the session). Even without the Kaggle-specific reading, the default points at a container path rather than at durable or versioned storage.
+
+**Recommended future fix:** default to `/kaggle/working/ray_image_dit_n8_v3`, or make `--output-dir` required, and print the resolved output directory plus whether HF upload is enabled at startup.
+
+**Regression risk:** none (a path string), though a resumed run must be pointed at the old directory explicitly.
+**Safe test:** parse the arguments and assert the resolved default is not under `/kaggle/tmp`.
+
+---
+
+#### RAY-038 — The milestone repository has no retention rule
+**Severity:** Low · **Classification:** Potential Risk · **Confidence:** Certain for the missing retention (grep: two `delete_file` call sites in the entire tree, both for the main repo); the size figure is computed, not measured
+
+**Files/lines** (audited commit `7b73c86`)
+* `ray_image/train_dit_v3.py:33-34` — `MILESTONE_REPO = "Rishix500/ray-image-dit-n8-v3-milestones"`, `MILESTONE_INTERVAL = 10_000`
+* `:401-414` — every 10 000 steps the current checkpoint is uploaded there and nothing is ever removed
+* `:256-267` — `cleanup_hf_checkpoints()` keeps `HF_CHECKPOINT_WINDOW = 4` (`:47`) files (`:260`) — but it is only called from `upload_checkpoint`, i.e. for the **main** repo (`:323`, `:339`)
+* Repo-wide `grep -n delete_file ray_image/*.py` → `train_dit_v3.py:262` and `train_dit_v2.py:239` only, i.e. the two main-repo pruners. The milestone repo appears in no cleanup path.
+
+**Consequence:** DiT v3 is 86.22 M parameters (§RAY-023), so one checkpoint (weights + two Adam moments at 4 B) is ≈ 1.03 GB; at 200 000 steps the milestone repo would hold ≈ 20 files ≈ **20.7 GB**, with every file also present in the main repo until the 4-file window evicts it. Growth is silent, unbounded by the code, and interacts with RAY-008 (a failed upload aborts a run) — the failure arrives late in a long run, when it is most expensive.
+
+**Recommended future fix:** an explicit retention policy (keep every Nth milestone, or a max count/age), a `--milestone-interval 0` opt-out, and a size line printed next to the existing archive message.
+
+**Regression risk:** deleting archives is irreversible — implement retention as an explicit, default-conservative policy and never prune below the last N.
+**Safe test:** with a mocked `HfApi`, feed a synthetic 20-file listing to the retention function and assert exactly which names it would delete for a given policy.
+
+---
+
+#### RAY-039 — The v2 VAE trainer re-saves and re-uploads its final checkpoint
+**Severity:** Low · **Classification:** Confirmed Bug · **Confidence:** Certain
+
+**Files/lines** (audited commit `7b73c86`)
+* `ray_image/train_vae_v2.py:168` — `last_checkpoint_step = args.start_step`; `:183` — the checkpoint's step, set **only** when resuming
+* `grep -n "last_checkpoint_step" ray_image/train_vae_v2.py` → `168, 183, 184, 186, 188, 192, 198, 268` — the periodic save at `:252-265` (the actual write is `:262`) never assigns it
+* `:268-273` — `if last_checkpoint_step != args.steps:` saves **and** re-uploads `ray_vae_v2_step_{args.steps:07d}.pt`
+
+**Consequence:** because the compared variable only ever holds the *start/resume* step, the guard cannot fire: whenever `--steps` is a multiple of 500 — the normal case, and exactly how the shipped VAE was trained (`ray_vae_v2_step_0047500.pt`) — the loop has already written that exact file at `:262`, and the tail block writes it again and uploads it again (content-equivalent; the bytes simply move twice, plus one extra `save_checkpoint` on the critical path at the end of the run). The guard reads like duplicate suppression but suppresses nothing.
+
+**Recommended future fix:** assign `last_checkpoint_step = current_step` inside the periodic-save branch (or test `checkpoint_path.exists()`).
+
+**Regression risk:** none.
+**Safe test:** drive the tail of `main()` with a stubbed `save_checkpoint` and assert the final block is skipped when the loop already wrote `args.steps`.
+
+---
+
 ## 5. Category analyses
 
 ### 5.1 Correctness and bugs (Confirmed / Probable)
@@ -347,16 +451,19 @@ With `padding=True`, a cache row has length `L = min(47, longest caption in that
 | RAY-022/023/024 | Missing LICENSE; wrong param counts; stale project state | see table |
 | RAY-030 | Smoke test timestep 500 vs training range [0,1] | `dit_v2_smoke.py:36` |
 | RAY-034 | "Optional" stats argument that is always applied | `generate.py:96-98` |
+| RAY-036 | Milestone archive bypassed by both fallback paths (disk-pressure and exception) | `train_dit_v3.py:384-393,401-414,416-429` |
+| RAY-039 | Final checkpoint re-saved/re-uploaded when `--steps` is a multiple of 500 | `train_vae_v2.py:168,183,252-265,268-273` |
 
 **Probable bugs** (logic is internally inconsistent with its own documented intent; runtime confirmation blocked):
 
 * **RAY-001** un-whitening mismatch (above).
 * **RAY-004** image-size/resolution mismatch in the N7/N8 warm-start path (above).
+* **RAY-035** silent, uncounted and unbounded stream skipping in all three `next_batch` implementations (see §4.3) — the code behaviour is certain; whether it matters depends on the stream's invalid-row rate, which needs one measurement.
 
 **Edge cases / validation gaps worth noting (not separate IDs):**
 * `RAYCaptionDataset.__init__` (`dataset.py:19`) calls `read_text()` without an explicit encoding and `json.loads` without error handling: one malformed manifest line aborts construction with a raw `JSONDecodeError`. It also opens images without a context manager (`dataset.py:30`).
 * `train_dit_v2.py:470` tests `torch.isnan(loss)` only, while `train_dit_v3.py:497` tests NaN **and** Inf — the v2 variant can in principle accept an `inf` loss (the subsequent gradient-clip guard catches most, but not all, cases).
-* `train_vae_v2.py:262-273` always writes/compares a final checkpoint even when `args.steps` is already a multiple of 500 (`if last_checkpoint_step != args.steps` is unreachable-true after the early return), re-uploading an identical file.
+* `train_vae_v2.py:252-265,268-273` always writes/compares a final checkpoint even when `args.steps` is already a multiple of 500 — the comparison variable `last_checkpoint_step` is never updated by the periodic save, so the tail block re-saves and re-uploads a content-equivalent file (**now tracked as RAY-039**, §4.3, which supersedes the earlier "unreachable-true" phrasing in this bullet).
 * `n4_smoke`/`probe_text_smoke`/`whiten_smoke` all assert successfully on **randomly initialised** models; their own docstrings correctly warn that the numbers are meaningless — but nothing in CI distinguishes "code path runs" from "model works", so a *scientific* regression in the probe maths would still pass.
 
 ### 5.2 Data integrity
@@ -404,6 +511,8 @@ With `padding=True`, a cache row has length `L = min(47, longest caption in that
 * **VRAM/latency:** `ray_image/dit_v2.py` builds 200 M params; `dit_v2_smoke` (CPU-capable) would need ~1.6 GB RAM on CPU. `train_dit_v3.py` uses gradient checkpointing per block with `use_reentrant=False` (`lines 219-255`) — correct choice for T4-class hardware.
 * **No memory-leak patterns found:** no module-level tensor caches, no growing global lists inside the step loops (the NaN-skip counters are bounded ints), no unclosed file handles except the un-context-managed `Image.open` in the dataset.
 * **Logging cost:** `checkpoint_has_corruption` walks every parameter with a GPU `torch.isfinite(...).all()` per checkpoint (every 500 steps) — negligible.
+* **Milestone storage growth (RAY-038, computed, not run):** ≈1.03 GB per milestone file for DiT v3 (weights + two Adam moments), one file per 10 000 steps, in a repository that nothing ever prunes (§4.3) → ≈20.7 GB for a 200 000-step run, duplicated in the main repo until the 4-file window evicts it. Compare the deliberate windows: `LOCAL_CHECKPOINT_WINDOW = 2`, `HF_CHECKPOINT_WINDOW = 4` — both apply to the main repo only.
+* **Default output directory is container-local (RAY-037):** `train_dit_v3.py:49,441` defaults to `/kaggle/tmp/checkpoints`; `train_dit_v2.py:344` and `train_vae_v2.py:129` default to `/kaggle/working/…`. With HF upload disabled or `HF_TOKEN` unset (`train_dit_v3.py:314-317`), the only copy of a run lands on the v3 default path. *Labeled inference:* this is likely session scratch rather than persisted output (see §4.3 for the caveat). The fix is one path string; the exposure is a whole run.
 
 ### 5.6 Numerical stability and reproducibility (AI/ML specific)
 
@@ -510,6 +619,8 @@ Consequence for the audit: no tracked file was created, modified, renamed, or de
 8. **RAY-020 / RAY-022 / RAY-023 / RAY-024 / RAY-030** documentation and notebook defects (see §5.8).
 9. **RAY-015** uninitialised `torch.empty` buffers used to assemble training batches.
 10. **RAY-034** an "optional" statistics argument that is always applied.
+11. **RAY-036** the 10 000-step milestone archive is skipped by both fallback paths (disk-pressure and exception) — see §4.3.
+12. **RAY-039** `train_vae_v2.py` re-saves and re-uploads its final checkpoint whenever `--steps` is a multiple of 500.
 
 ### 7.2 Probable bugs (logic inconsistent with its own stated intent — needs one experiment to confirm)
 
@@ -517,6 +628,7 @@ Consequence for the audit: no tracked file was created, modified, renamed, or de
 2. **RAY-004** 64 px inputs into a 256 px VAE on the N7/N8 warm-start path.
 3. **RAY-031** empty legacy caption ⇒ all-padding row ⇒ fully-masked cross-attention (documented as 0 in modern PyTorch, historically NaN; never observed here because the toy captions are never empty).
 4. **RAY-003 (the 47-token part)** — likely benign today, but only because every MONET Florence-2 caption is long enough to be truncated; unproven for the published cache.
+5. **RAY-035** uncounted, unbounded stream skipping in `next_batch` (all three trainers) — the mechanism is certain, the rate is not; one measurement settles it (§4.3).
 
 ### 7.3 Potential risks (contingent, but cheap to neutralise)
 
@@ -528,6 +640,8 @@ Consequence for the audit: no tracked file was created, modified, renamed, or de
 * **RAY-029** 1-D RoPE over a flattened 2-D grid (loses v2's explicit 2-D bias).
 * **RAY-032** stale notebook outputs leaking private slugs/paths.
 * **RAY-009** zero CI coverage for the current architecture generation.
+* **RAY-037** the v3 trainer's default output directory is container-local scratch, so a run without HF uploads keeps its only copy somewhere that may not outlive the session.
+* **RAY-038** the milestone repository grows without a retention rule (≈20.7 GB at 200 000 steps).
 
 ### 7.4 Improvements / informational
 
@@ -660,6 +774,9 @@ Stages 3.4 and 4 are quality-of-life; RAY-029 (RoPE dimensionality) is a researc
 - [ ] **RAY-012** Verify/declare the precision policy for T4 (bf16 vs fp16) *(Potential Risk)*
 - [ ] **RAY-013** Non-zero exit for empty/missing evaluation directories *(Confirmed)*
 - [ ] **RAY-014** Document the N8 pipeline; unpin stale branches in notebooks *(Potential Risk)*
+- [ ] **RAY-035** Count and bound the stream skips in `next_batch`; split caption failures from image failures *(Probable Bug)*
+- [ ] **RAY-036** Archive milestones on the fallback paths too; keep the token check out of the mislabelling `except` *(Confirmed)*
+- [ ] **RAY-037** Durable default checkpoint directory (or require `--output-dir`) *(Potential Risk)*
 
 ### Low / Informational
 - [ ] **RAY-015** `torch.empty` → validated assembly *(Confirmed)*
@@ -682,6 +799,8 @@ Stages 3.4 and 4 are quality-of-life; RAY-029 (RoPE dimensionality) is a researc
 - [ ] **RAY-032** Strip notebook outputs *(Potential Risk)*
 - [ ] **RAY-033** Archive/kill stale branches; tidy the accidental backend remnants *(Improvement)*
 - [ ] **RAY-034** Remove the always-on default for `--latent-stats` *(Informational)*
+- [ ] **RAY-038** Milestone retention policy + `--milestone-interval 0` opt-out *(Potential Risk)*
+- [ ] **RAY-039** Fix the duplicate final save/upload in `train_vae_v2.py` *(Confirmed)*
 
 ---
 
@@ -749,3 +868,5 @@ RAY-IMAGE is an unusually self-critical research repository with a strong diagno
 ---
 
 *End of report. This document is the sole artefact of the audit and was written outside the repository. No fix, refactor, cleanup, commit, branch, PR, workflow or repository setting was performed. All recommendations are deferred to the owner.*
+
+*Superseded in part by the two addenda at the top of this file: the report now lives inside the repository, five supplementary findings (§4.3) have been added, and the owner's separate RB-01…RB-17 remediation work is implemented on the session branch (PR #6). The audit window itself (08:12–08:18 UTC, 2026-10-11) remains exactly as described above: read-only, nothing modified.*
