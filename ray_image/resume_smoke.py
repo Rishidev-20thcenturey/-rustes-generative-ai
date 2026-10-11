@@ -34,9 +34,17 @@ def _tiny_model(seed=0):
     return model, optimizer
 
 
-def _tiny_expected():
-    return {"image_size": 256, "latent_channels": 16, "latent_size": 32, "dim": 64,
-            "depth": 1, "heads": 4, "patch": 2, "text_dim": 2560}
+def _expected_config():
+    """The architecture values ``_checkpoint_payload`` records.
+
+    These are the module constants (the values a real run stores), NOT the tiny
+    test-model size: ``_checkpoint_payload`` always writes the module constants,
+    so the expected dict must mirror them. Keep in sync with
+    ``train_dit_v3._generation_config``.
+    """
+    return {"image_size": T.IMAGE_SIZE, "latent_channels": T.LATENT_CHANNELS,
+            "latent_size": T.LATENT_SIZE, "dim": T.MODEL_DIM, "depth": T.MODEL_DEPTH,
+            "heads": T.MODEL_HEADS, "patch": T.MODEL_PATCH, "text_dim": T.TEXT_DIM}
 
 
 def main() -> None:
@@ -60,16 +68,16 @@ def main() -> None:
     ckpt_path = tmp / "tiny.pt"
     torch.save(payload, ckpt_path)
 
-    step = T.load_resume(ckpt_path, model, optimizer, device, expected_config=_tiny_expected())
+    step = T.load_resume(ckpt_path, model, optimizer, device, expected_config=_expected_config())
     assert step == 7, step
     print("[RB-11] matching config resumes cleanly (step=7)")
 
     mismatched = T._checkpoint_payload(model, optimizer, step=7, seed=3)
-    mismatched["config"]["dim"] = 512  # pretend a different architecture
+    mismatched["config"]["dim"] = T.MODEL_DIM * 2  # pretend a different architecture
     bad_path = tmp / "mismatch.pt"
     torch.save(mismatched, bad_path)
     try:
-        T.load_resume(bad_path, model, optimizer, device, expected_config=_tiny_expected())
+        T.load_resume(bad_path, model, optimizer, device, expected_config=_expected_config())
     except RuntimeError as exc:
         assert "mismatch" in str(exc), exc
         print("[RB-11] architecture mismatch correctly raises RuntimeError")
@@ -81,10 +89,11 @@ def main() -> None:
     missing["config"].pop("latent_space", None)
     missing_path = tmp / "missing_keys.pt"
     torch.save(missing, missing_path)
-    warned = T.load_resume(missing_path, model, optimizer, device,
-                           expected_config=_tiny_expected())
+    warned = T.check_resume_config(missing, expected=_expected_config())
     assert warned == ["patch"], warned
-    print(f"[RB-11] missing keys warn only (warned={warned})")
+    assert T.load_resume(missing_path, model, optimizer, device,
+                         expected_config=_expected_config()) == 7
+    print(f"[RB-11] missing keys warn only (warned={warned}); checkpoint still loads")
 
     # ---------------------------------------------------------- RB-01/RB-02
     stats_path = tmp / "stats.json"
