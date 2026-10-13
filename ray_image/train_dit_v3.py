@@ -5,6 +5,7 @@ embeddings are sampled directly from the local MONET 50k cache.
 """
 
 import argparse
+import copy
 import io
 import os
 import random
@@ -23,6 +24,18 @@ from torch.optim import AdamW
 from torch.utils.checkpoint import checkpoint
 from tqdm import tqdm
 
+from .cfg import (
+    EMA_CHECKPOINT_PREFIX,
+    NULL_PROMPT,
+    apply_caption_dropout,
+    ema_checkpoint_payload,
+    ema_drift,
+    encode_null_prompt,
+    fit_null_to_length,
+    load_or_build_null_prompt,
+    save_ema_checkpoint,
+    update_ema,
+)
 from .dit_v3 import RAYDiT_v3
 from .text_encoder import RAYTextEncoder
 from .vae_v2 import RAYVAE_v2
@@ -72,6 +85,10 @@ GENERATION_CONFIG_KEYS = (
 # RB-03: populated once per process in main() so every checkpoint records which
 # run produced it.
 RUN_ID = None
+
+# Issue #7 (RB-10): CFG settings, populated in main() and recorded in checkpoints.
+CAPTION_DROP = 0.10
+EMA_DECAY = 0.999
 
 
 def seed_everything(seed: int) -> None:
@@ -293,15 +310,18 @@ def _checkpoint_sort_key(filename: str):
 
 
 def cleanup_hf_checkpoints(api: HfApi, repo_id: str) -> None:
+    # Issue #7: resume checkpoints and EMA weights are windowed separately so an
+    # EMA file is never evicted by the resume-checkpoint window (or vice versa).
     try:
         files = api.list_repo_files(repo_id=repo_id, repo_type="model")
-        checkpoints = sorted({p for p in files if Path(p).name.startswith("ray_dit_v3_step_") and Path(p).suffix == ".pt"}, key=_checkpoint_sort_key)
-        for path in checkpoints[:-HF_CHECKPOINT_WINDOW]:
-            try:
-                api.delete_file(path_in_repo=path, repo_id=repo_id, repo_type="model", commit_message=f"chore: remove old DiT v3 checkpoint {Path(path).name}")
-                print(f"[HF cleanup] deleted {path}")
-            except Exception as exc:
-                print(f"[HF cleanup] failed to delete {path}: {exc}")
+        for prefix in ("ray_dit_v3_step_", EMA_CHECKPOINT_PREFIX):
+            checkpoints = sorted({p for p in files if Path(p).name.startswith(prefix) and Path(p).suffix == ".pt"}, key=_checkpoint_sort_key)
+            for path in checkpoints[:-HF_CHECKPOINT_WINDOW]:
+                try:
+                    api.delete_file(path_in_repo=path, repo_id=repo_id, repo_type="model", commit_message=f"chore: remove old DiT v3 checkpoint {Path(path).name}")
+                    print(f"[HF cleanup] deleted {path}")
+                except Exception as exc:
+                    print(f"[HF cleanup] failed to delete {path}: {exc}")
     except Exception as exc:
         print(f"[HF cleanup] listing failed for {repo_id}: {exc}")
 
@@ -377,8 +397,8 @@ def check_resume_config(checkpoint_data, expected=None):
     return missing
 
 
-def _checkpoint_payload(model, optimizer, step, seed):
-    return {
+def _checkpoint_payload(model, optimizer, step, seed, ema=None):
+    payload = {
         "stage": "dit_v3_n8",
         "step": step,
         "seed": seed,
@@ -401,10 +421,17 @@ def _checkpoint_payload(model, optimizer, step, seed):
             "vae_checkpoint": VAE_CHECKPOINT,
             "torch": torch.__version__,
             "run": RUN_ID,
+            # Issue #7: CFG provenance (new keys only).
+            "caption_drop": CAPTION_DROP,
+            "ema_decay": EMA_DECAY,
+            "null_prompt": NULL_PROMPT,
         },
         "dit": model.state_dict(),
         "optimizer": optimizer.state_dict(),
     }
+    if ema is not None:
+        payload["ema"] = ema.state_dict()
+    return payload
 
 
 def upload_checkpoint(local_path: Path, repo_id: str) -> None:
@@ -419,11 +446,27 @@ def upload_checkpoint(local_path: Path, repo_id: str) -> None:
     cleanup_hf_checkpoints(api, repo_id)
 
 
-def upload_checkpoint_direct(model, optimizer, step: int, seed: int, repo_id: str) -> None:
+def _ema_file_config() -> dict:
+    """Config recorded in EMA weight files (architecture + CFG provenance)."""
+    config = dict(_generation_config())
+    config.update({
+        "text_max_tokens": TEXT_MAX_TOKENS,
+        "cross_gate": True,
+        "latent_space": LATENT_SPACE,
+        "vae_checkpoint": VAE_CHECKPOINT,
+        "run": RUN_ID,
+        "caption_drop": CAPTION_DROP,
+        "ema_decay": EMA_DECAY,
+        "null_prompt": NULL_PROMPT,
+    })
+    return config
+
+
+def upload_checkpoint_direct(model, optimizer, step: int, seed: int, repo_id: str, ema=None) -> None:
     token = os.getenv("HF_TOKEN")
     if not token:
         raise RuntimeError("HF_TOKEN is required for direct checkpoint upload when disk is near full")
-    payload = _checkpoint_payload(model, optimizer, step, seed)
+    payload = _checkpoint_payload(model, optimizer, step, seed, ema=ema)
     buffer = io.BytesIO()
     torch.save(payload, buffer)
     buffer.seek(0)
@@ -432,8 +475,16 @@ def upload_checkpoint_direct(model, optimizer, step: int, seed: int, repo_id: st
     api.create_repo(repo_id=repo_id, repo_type="model", private=True, exist_ok=True)
     api.upload_file(path_or_fileobj=buffer, path_in_repo=filename, repo_id=repo_id, repo_type="model", commit_message=f"upload DiT v3 checkpoint {filename}")
     print(f"[HF] uploaded {filename} directly from memory (local save skipped)")
-    cleanup_hf_checkpoints(api, repo_id)
     buffer.close()
+    if ema is not None:
+        ema_filename = f"{EMA_CHECKPOINT_PREFIX}{step:07d}.pt"
+        ema_buffer = io.BytesIO()
+        torch.save(ema_checkpoint_payload(ema, step, _ema_file_config()), ema_buffer)
+        ema_buffer.seek(0)
+        api.upload_file(path_or_fileobj=ema_buffer, path_in_repo=ema_filename, repo_id=repo_id, repo_type="model", commit_message=f"upload DiT v3 EMA weights {ema_filename}")
+        print(f"[HF] uploaded {ema_filename} directly from memory (local save skipped)")
+        ema_buffer.close()
+    cleanup_hf_checkpoints(api, repo_id)
 
 
 def checkpoint_has_corruption(model: RAYDiT_v3) -> bool:
@@ -445,11 +496,11 @@ def checkpoint_has_corruption(model: RAYDiT_v3) -> bool:
     return False
 
 
-def save_checkpoint(path, model, optimizer, step, seed) -> bool:
+def save_checkpoint(path, model, optimizer, step, seed, ema=None) -> bool:
     if checkpoint_has_corruption(model):
         print(f"[checkpoint guard] SKIP step={step}: corrupted model weights")
         return False
-    torch.save(_checkpoint_payload(model, optimizer, step, seed), path)
+    torch.save(_checkpoint_payload(model, optimizer, step, seed, ema=ema), path)
     return True
 
 
@@ -473,10 +524,22 @@ def set_learning_rate(optimizer, base_lr, step) -> float:
     return lr
 
 
-def save_or_upload_checkpoint(output_dir: Path, dit, optimizer, step: int, seed: int, hf_repo: str, no_hf_upload: bool) -> None:
+def cleanup_local_ema(output_dir: Path, keep: int = LOCAL_CHECKPOINT_WINDOW) -> None:
+    """Issue #7: same window policy as cleanup_local_checkpoints, for EMA files."""
+    paths = sorted((p for p in output_dir.glob(f"{EMA_CHECKPOINT_PREFIX}*.pt") if p.is_file()), key=lambda p: _checkpoint_sort_key(p.name))
+    for path in paths[:-keep] if keep > 0 else paths:
+        try:
+            path.unlink()
+            print(f"[local cleanup] deleted {path}")
+        except OSError as exc:
+            print(f"[local cleanup] failed to delete {path}: {exc}")
+
+
+def save_or_upload_checkpoint(output_dir: Path, dit, optimizer, step: int, seed: int, hf_repo: str, no_hf_upload: bool, ema=None) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     local_disk_pct = log_disk_usage(output_dir, prefix=f"[disk] checkpoint step={step}")
     checkpoint_path = output_dir / f"ray_dit_v3_step_{step:07d}.pt"
+    ema_path = output_dir / f"{EMA_CHECKPOINT_PREFIX}{step:07d}.pt"
 
     if local_disk_pct >= DISK_REFUSE_SAVE_PCT:
         print(f"[checkpoint] local disk usage {local_disk_pct:.1f}% >= {DISK_REFUSE_SAVE_PCT:.1f}%; refusing local save")
@@ -486,15 +549,22 @@ def save_or_upload_checkpoint(output_dir: Path, dit, optimizer, step: int, seed:
         if checkpoint_has_corruption(dit):
             print(f"[checkpoint guard] SKIP step={step}: corrupted model weights")
             return
-        upload_checkpoint_direct(dit, optimizer, step, seed, hf_repo)
+        upload_checkpoint_direct(dit, optimizer, step, seed, hf_repo, ema=ema)
         return
 
     try:
-        if save_checkpoint(checkpoint_path, dit, optimizer, step, seed):
+        if save_checkpoint(checkpoint_path, dit, optimizer, step, seed, ema=ema):
             print(f"[checkpoint] {checkpoint_path}")
+            if ema is not None:
+                save_ema_checkpoint(ema_path, ema, step, _ema_file_config())
+                print(f"[checkpoint] {ema_path}")
             if not no_hf_upload:
                 upload_checkpoint(checkpoint_path, hf_repo)
+                if ema is not None:
+                    upload_checkpoint(ema_path, hf_repo)
             cleanup_local_checkpoints(output_dir, keep=LOCAL_CHECKPOINT_WINDOW)
+            if ema is not None:
+                cleanup_local_ema(output_dir, keep=LOCAL_CHECKPOINT_WINDOW)
             if step > 0 and step % MILESTONE_INTERVAL == 0:
                 print(f"\n💎 [milestone] Step {step} reached. Archiving to {MILESTONE_REPO}...")
                 token = os.getenv("HF_TOKEN")
@@ -517,13 +587,30 @@ def save_or_upload_checkpoint(output_dir: Path, dit, optimizer, step: int, seed:
                 checkpoint_path.unlink()
             except OSError:
                 pass
+        if ema_path.exists():
+            try:
+                ema_path.unlink()
+            except OSError:
+                pass
         if no_hf_upload:
             raise
         if checkpoint_has_corruption(dit):
             print(f"[checkpoint guard] SKIP step={step}: corrupted model weights")
             return
-        upload_checkpoint_direct(dit, optimizer, step, seed, hf_repo)
+        upload_checkpoint_direct(dit, optimizer, step, seed, hf_repo, ema=ema)
         cleanup_local_checkpoints(output_dir, keep=LOCAL_CHECKPOINT_WINDOW)
+        if ema is not None:
+            cleanup_local_ema(output_dir, keep=LOCAL_CHECKPOINT_WINDOW)
+
+
+def _encode_null_with_qwen() -> dict:
+    """Issue #7: build the null prompt with a temporary Qwen encoder (cache mode)."""
+    encoder = RAYTextEncoder(model_name=RAYTextEncoder.MODEL_ID, max_tokens=TEXT_MAX_TOKENS, load_in_8bit=True).eval()
+    try:
+        return encode_null_prompt(encoder, TEXT_MAX_TOKENS)
+    finally:
+        del encoder
+        torch.cuda.empty_cache()
 
 
 def main():
@@ -538,9 +625,20 @@ def main():
     parser.add_argument("--output-dir", type=str, default=LOCAL_CHECKPOINT_DIR)
     parser.add_argument("--hf-repo", type=str, default=HF_DEFAULT_REPO)
     parser.add_argument("--no-hf-upload", action="store_true")
+    parser.add_argument("--caption-drop", type=float, default=0.10,
+                        help="Issue #7: per-sample probability of replacing the caption with the null prompt.")
+    parser.add_argument("--ema-decay", type=float, default=0.999,
+                        help="Issue #7: EMA decay; ema = decay * ema + (1 - decay) * model after each step.")
     args = parser.parse_args()
     if args.steps < 0 or args.batch_size <= 0 or args.lr <= 0 or args.start_step < 0:
         raise ValueError("invalid training arguments")
+    if not 0.0 <= args.caption_drop <= 1.0:
+        raise ValueError("--caption-drop must be in [0, 1]")
+    if not 0.0 < args.ema_decay < 1.0:
+        raise ValueError("--ema-decay must be in (0, 1)")
+    global CAPTION_DROP, EMA_DECAY
+    CAPTION_DROP = args.caption_drop
+    EMA_DECAY = args.ema_decay
     if args.resume and args.start_step:
         raise ValueError("Use either --resume or --start-step, not both")
     if not torch.cuda.is_available():
@@ -573,6 +671,26 @@ def main():
     if args.steps <= last_step:
         print(f"[done] target steps={args.steps} already reached at step={last_step}")
         return
+    # Issue #7: null placeholder embedding. Fetched from HF on later sessions;
+    # rebuilt once (with the loaded encoder, or a temporary Qwen in cache mode)
+    # and uploaded to a private repo only if the fetch fails.
+    if text_encoder is not None:
+        null_build_fn = lambda: encode_null_prompt(text_encoder, TEXT_MAX_TOKENS)
+    else:
+        null_build_fn = _encode_null_with_qwen
+    null_payload = load_or_build_null_prompt(
+        args.hf_repo, text_dim=TEXT_DIM, build_fn=null_build_fn, upload=not args.no_hf_upload,
+    )
+    null_emb_full = null_payload["emb"].to(device=device, dtype=torch.float16)
+    null_mask_full = null_payload["mask"].to(device=device, dtype=torch.bool)
+    # Issue #7: EMA of the DiT weights. Resume does not restore EMA state (the
+    # resume logic is unchanged), so EMA starts from the current weights.
+    ema = copy.deepcopy(dit)
+    ema.requires_grad_(False)
+    ema.eval()
+    print(f"[cfg] caption_drop={args.caption_drop:.3f} null_prompt={NULL_PROMPT!r} null_tokens={null_emb_full.shape[0]} ema_decay={args.ema_decay}")
+    if last_step > 0:
+        print("[ema] initialised from current weights at start/resume step (EMA state is not restored from checkpoint)")
     print(f"[DiT v3] trainable parameters: {sum(p.numel() for p in dit.parameters()):,}")
     print(f"[config] batch={args.batch_size} lr={args.lr:.2e} warmup={WARMUP_STEPS} target_steps={args.steps}")
     print("[precision] DiT forward fp16; cached Qwen embeddings are fp16")
@@ -581,6 +699,8 @@ def main():
     nan_skip_count = 0
     running_loss = 0.0
     running_count = 0
+    window_dropped = 0
+    window_total = 0
     pbar = tqdm(total=args.steps - last_step, desc="RAY-DiT v3 N8")
     for step in range(last_step + 1, args.steps + 1):
         current_lr = set_learning_rate(optimizer, args.lr, step)
@@ -599,6 +719,13 @@ def main():
             clean_latents = clean_latents.to(device=device, dtype=torch.float32)
             text_hidden = text_hidden.to(device=device, dtype=torch.float16)
             text_mask = text_mask.to(device=device, dtype=torch.bool)
+        # Issue #7: caption dropout -> null placeholder, per sample.
+        null_emb_fit, null_mask_fit = fit_null_to_length(null_emb_full, null_mask_full, text_hidden.shape[1])
+        text_hidden, text_mask, dropped_now = apply_caption_dropout(
+            text_hidden, text_mask, null_emb_fit, null_mask_fit, args.caption_drop,
+        )
+        window_dropped += dropped_now
+        window_total += text_hidden.shape[0]
         noise = torch.randn_like(clean_latents)
         t = torch.rand(clean_latents.shape[0], device=device)
         t_view = t[:, None, None, None]
@@ -618,7 +745,10 @@ def main():
             pbar.set_postfix(loss="nan", lr=f"{current_lr:.1e}")
             if step % LOG_EVERY == 0:
                 vram_gb = torch.cuda.memory_allocated(device) / (1024 ** 3)
-                print(f"step={step} loss=nan grad_norm=nan zero_pred_mse={zero_pred_mse:.6f} NaN_skip_count={nan_skip_count} vram_used={vram_gb:.2f}GB")
+                dropped_frac = window_dropped / max(window_total, 1)
+                window_dropped = 0
+                window_total = 0
+                print(f"step={step} loss=nan grad_norm=nan zero_pred_mse={zero_pred_mse:.6f} NaN_skip_count={nan_skip_count} vram_used={vram_gb:.2f}GB dropped={dropped_frac:.3f} ema_drift={ema_drift(ema, dit):.6e}")
             continue
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(dit.parameters(), GRAD_CLIP)
@@ -628,6 +758,7 @@ def main():
             pbar.update(1)
             continue
         optimizer.step()
+        update_ema(ema, dit, args.ema_decay)  # Issue #7: after every optimizer.step()
         running_loss += float(loss.item())
         running_count += 1
         pbar.update(1)
@@ -635,14 +766,17 @@ def main():
         if step % LOG_EVERY == 0:
             mean_loss = running_loss / max(running_count, 1)
             vram_gb = torch.cuda.memory_allocated(device) / (1024 ** 3)
-            print(f"step={step} loss={loss.item():.6f} loss_avg={mean_loss:.6f} grad_norm={float(grad_norm):.4f} zero_pred_mse={zero_pred_mse:.6f} NaN_skip_count={nan_skip_count} vram_used={vram_gb:.2f}GB")
+            dropped_frac = window_dropped / max(window_total, 1)
+            window_dropped = 0
+            window_total = 0
+            print(f"step={step} loss={loss.item():.6f} loss_avg={mean_loss:.6f} grad_norm={float(grad_norm):.4f} zero_pred_mse={zero_pred_mse:.6f} NaN_skip_count={nan_skip_count} vram_used={vram_gb:.2f}GB dropped={dropped_frac:.3f} ema_drift={ema_drift(ema, dit):.6e}")
             running_loss = 0.0
             running_count = 0
         if step % CHECKPOINT_EVERY == 0:
-            save_or_upload_checkpoint(output_dir, dit, optimizer, step, args.seed, args.hf_repo, args.no_hf_upload)
+            save_or_upload_checkpoint(output_dir, dit, optimizer, step, args.seed, args.hf_repo, args.no_hf_upload, ema=ema)
     pbar.close()
     if args.steps % CHECKPOINT_EVERY != 0:
-        save_or_upload_checkpoint(output_dir, dit, optimizer, args.steps, args.seed, args.hf_repo, args.no_hf_upload)
+        save_or_upload_checkpoint(output_dir, dit, optimizer, args.steps, args.seed, args.hf_repo, args.no_hf_upload, ema=ema)
 
 
 if __name__ == "__main__":

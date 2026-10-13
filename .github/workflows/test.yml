@@ -33,3 +33,5 @@ jobs:
         run: python -m ray_image.n5_smoke
       - name: Run checkpoint provenance / resume smoke test
         run: python -m ray_image.resume_smoke
+      - name: Run CFG smoke test (caption dropout, null prompt, EMA)
+        run: python -m ray_image.cfg_smoke
