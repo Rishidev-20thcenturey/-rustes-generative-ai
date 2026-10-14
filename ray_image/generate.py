@@ -1,10 +1,17 @@
 """Generate an image from a trained RAY-IMAGE checkpoint."""
 import argparse
+import re
 from pathlib import Path
 
 import torch
 from PIL import Image
 
+from .cfg import (
+    NULL_PROMPT_REPO_DEFAULT,
+    encode_null_prompt,
+    fit_null_to_length,
+    load_or_build_null_prompt,
+)
 from .config import RAYConfig
 from .flow import euler_sample
 from .dit_v3 import RAYDiT_v3
@@ -16,6 +23,9 @@ DEFAULT_LATENT_STATS = Path(__file__).with_name("latent_stats_corrected.json")
 
 # Legacy generator stages that must never be silently served by this script.
 UNSUPPORTED_STAGE_PREFIX = "generator_v0.3"
+
+# Issue #7: EMA weight files written by train_dit_v3.py.
+EMA_FILE_RE = re.compile(r"^ray_dit_v3_ema_step_\d+\.pt$")
 
 
 def assert_supported_stage(checkpoint) -> None:
@@ -185,7 +195,20 @@ def main():
     parser.add_argument("--output", default="generated.png")
     parser.add_argument("--steps", type=int, default=40)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--cfg-scale", type=float, default=1.0,
+                        help="Issue #7: classifier-free guidance scale. Values > 1.0 run the DiT twice per "
+                             "step (prompt and null prompt) and combine uncond + scale * (cond - uncond). "
+                             "Requires --vae-checkpoint (v3 route).")
+    parser.add_argument("--use-ema", action="store_true",
+                        help="Issue #7: --checkpoint must be a ray_dit_v3_ema_step_*.pt file; its 'dit' weights are used. "
+                             "Requires --vae-checkpoint (v3 route).")
+    parser.add_argument("--null-prompt-repo", default=NULL_PROMPT_REPO_DEFAULT,
+                        help="HF repo holding aux/null_prompt_emb.pt (used when --cfg-scale > 1).")
     args = parser.parse_args()
+    if args.use_ema and not EMA_FILE_RE.match(Path(args.checkpoint).name):
+        raise ValueError(f"--use-ema requires an EMA checkpoint named ray_dit_v3_ema_step_*.pt, got {args.checkpoint!r}")
+    if (args.use_ema or args.cfg_scale > 1.0) and args.vae_checkpoint is None:
+        raise ValueError("--use-ema and --cfg-scale > 1.0 are only supported on the v3 route (pass --vae-checkpoint)")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(args.seed)
@@ -200,6 +223,24 @@ def main():
         text, text_mask = text_encoder.encode_texts([args.prompt])
         text = text.to(device)
         text_mask = text_mask.to(device)
+        null_text = null_mask = None
+        if args.cfg_scale > 1.0:
+            # Issue #7: null prompt for CFG. Fetched from HF; if that fails it is
+            # rebuilt once with the already-loaded encoder (not uploaded here).
+            null_payload = load_or_build_null_prompt(
+                args.null_prompt_repo,
+                text_dim=RAYTextEncoder.HIDDEN_SIZE,
+                build_fn=lambda: encode_null_prompt(text_encoder, cfg.max_tokens),
+                upload=False,
+            )
+            null_emb, null_valid = fit_null_to_length(
+                null_payload["emb"].to(device=device, dtype=text.dtype),
+                null_payload["mask"].to(device=device),
+                text.shape[1],
+            )
+            null_text = null_emb.unsqueeze(0)
+            null_mask = null_valid.unsqueeze(0)
+            print(f"[cfg] scale={args.cfg_scale} null_tokens={null_payload['emb'].shape[0]}")
         latent = euler_sample(
             dit,
             text,
@@ -207,6 +248,9 @@ def main():
             steps=args.steps,
             device=device,
             text_mask=text_mask,
+            cfg_scale=args.cfg_scale,
+            null_text=null_text,
+            null_mask=null_mask,
         )
         # Un-whitening is applied only when the checkpoint stores whitening state
         # (see resolve_whitening); otherwise the sampler output is decoded as-is.

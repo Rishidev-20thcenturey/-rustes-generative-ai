@@ -148,3 +148,47 @@ encoder_failure / non_finite / shape_mismatch) — a chunk with a large
 | `[resume] refusing to resume: ... mismatch` | Checkpoint and current constants disagree | Use the matching script/constants or start a fresh run (RB-11) |
 | `[resume] WARNING: ... missing latent_space` | Pre-RB-03 checkpoint | Harmless; the run proceeds |
 | `NotImplementedError: generation from stage='generator_v0.3...'` | Legacy N5/N7/N8 checkpoint served by `generate.py` | Expected (RB-04); those stages are not supported for inference |
+
+---
+
+## 7. CFG session recipe (issue #7: caption dropout, null prompt, EMA, CFG sampling)
+
+Kaggle notebook cells for a session that trains or samples with CFG. Run them in
+this order, **then restart the kernel** before importing torch.
+
+```python
+!pip uninstall -y torchaudio torchvision
+!pip install -q -U transformers bitsandbytes accelerate huggingface_hub datasets safetensors peft tokenizers einops lpips
+```
+
+* **Every session must restart the kernel after `pip install`.** Kaggle keeps the
+  previously imported binary modules alive; only a new kernel picks up the new wheels.
+* `ray_image/text_encoder.py` pins Qwen to `device_map={'': 0}` (already applied).
+  It is not spread across both T4s.
+* Note: `peft` and `einops` are listed in the cell above as the issue #7 recipe. No module
+  in this repository imports them; they are harmless but not required by this code.
+  The §1 install recipe above (no pins, plus `torch`/`torchvision`) remains the reference
+  for `torch` itself.
+
+Warning suppression and a persisted transcript for long runs (see §4 for the full form):
+
+```bash
+export PYTHONWARNINGS="ignore" TRANSFORMERS_VERBOSITY=error HF_HUB_DISABLE_PROGRESS_BARS=1 TQDM_DISABLE=1
+LOG=/kaggle/working/dit_v3_cfg_$(date -u +%Y%m%dT%H%M%SZ).log
+python -u -m ray_image.train_dit_v3 --cache-path /kaggle/input/monet-qwen-cache \
+    --steps 200000 --batch-size 8 --caption-drop 0.10 --ema-decay 0.999 \
+  2>&1 | grep -v -E "Some weights of|You should probably|warnings.warn|FutureWarning" | tee "$LOG"
+grep -E "^step=|\[null\]|\[checkpoint\]|\[resume\]|Traceback" "$LOG" | tail -50
+```
+
+Sampling with CFG (after kernel restart; requires the v3 route):
+
+```bash
+python -m ray_image.generate --checkpoint ray_dit_v3_ema_step_0200000.pt --use-ema \
+    --vae-checkpoint <vae.pt> --prompt "a watercolor harbour at dusk" \
+    --cfg-scale 3.0 --steps 40 --output out.png
+```
+
+The null prompt (`aux/null_prompt_emb.pt` in the DiT repo) is fetched from HF. If it is
+absent, `train_dit_v3.py` rebuilds it once and uploads it to the private repo; `generate.py`
+rebuilds it locally without uploading.
