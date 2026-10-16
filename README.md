@@ -6,6 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/Rishidev-20thcenturey/-rustes-generative-ai/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/Rishidev-20thcenturey/-rustes-generative-ai/test.yml?branch=main&label=smoke%20checks&style=for-the-badge" alt="GitHub Actions workflow status" /></a>
+  <a href="https://huggingface.co/Rishix500"><img src="https://img.shields.io/badge/Hugging%20Face-Explore%20RAY--IMAGE-FFD21E?style=for-the-badge&logo=huggingface&logoColor=000000" alt="Explore RAY-IMAGE on Hugging Face Hub" /></a>
   <img src="https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11" />
   <img src="https://img.shields.io/badge/PyTorch-2.5%2B-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white" alt="PyTorch 2.5 or newer" />
   <img src="https://img.shields.io/badge/Stage-Research%20Preview-8B7CF6?style=for-the-badge" alt="Research preview" />
@@ -23,6 +24,7 @@
   <a href="#-at-a-glance">At a glance</a> ·
   <a href="#-architecture">Architecture</a> ·
   <a href="#-research-status">Research status</a> ·
+  <a href="#-hugging-face-hub">Hugging Face Hub</a> ·
   <a href="#-run-the-smoke-checks">Run smoke checks</a> ·
   <a href="#-limitations-and-reproducibility">Limitations</a>
 </p>
@@ -49,7 +51,7 @@ The project is deliberately developed under tight compute limits. Its guiding ru
 | **Data path** | MONET image-caption streaming and cached latent/text embeddings |
 | **Engineering focus** | Resumable checkpoints, provenance metadata, smoke checks, and diagnostics |
 | **Compute intent** | Workflows designed around constrained cloud-GPU sessions |
-| **Release state** | Research code; no final public checkpoint or validated benchmark is promised here |
+| **Release state** | Research preview; an experimental N8 v2 checkpoint is hosted separately, with no final quality-validated release or benchmark claimed here |
 
 ## ◈ Architecture
 
@@ -107,7 +109,7 @@ This table separates code that exists from outcomes that still require evidence.
 | Cached-data pipeline | MONET cache builder and cache readers support chunked latent/text data | Implemented tooling; a cache build still depends on external data/model access |
 | Resume and provenance safeguards | Checkpoint configuration validation and a CPU smoke script are present | Smoke-tested in CI on the corresponding development change |
 | End-to-end image quality | No final benchmark suite or reproducible gallery is supplied by this README | Not claimed |
-| Public model release | Model weights are not stored in this Git repository | Not presented as a release |
+| Hugging Face artifact | An experimental N8 v2 checkpoint is hosted outside this Git repository | Published research artifact; not a final quality-validated release |
 
 Useful project records:
 
@@ -115,6 +117,16 @@ Useful project records:
 - [Repository forensic audit](REPO_AUDIT_README.md) — a **dated, historical audit** of the inspected tree, including later addenda. It is not a live bug tracker; some listed items were addressed by subsequent changes.
 - [CI smoke workflow](.github/workflows/test.yml) — the checks run on pushes and pull requests targeting `main`.
 - [Project-state notes](PROJECT_STATE.md) — an older phase snapshot. Check the current code and commit history before relying on its milestone counts.
+
+## 🤗 Hugging Face Hub
+
+RAY-IMAGE's experimental model artifact and supporting training cache are hosted outside this Git repository on Hugging Face Hub.
+
+- **Model artifact:** [`Rishix500/ray-image-dit-n8-v2`](https://huggingface.co/Rishix500/ray-image-dit-n8-v2)
+- **Training cache:** [`Rishix500/monet-qwen-cache-200k`](https://huggingface.co/datasets/Rishix500/monet-qwen-cache-200k)
+- **Hugging Face profile:** [`Rishix500`](https://huggingface.co/Rishix500)
+
+The checkpoint is shared as an experimental research artifact, not as a finished or quality-validated model release. Hosted text-to-image inference is not currently enabled for this model; these links lead to the published artifacts and project profile.
 
 ## ⚙️ Get the code
 
