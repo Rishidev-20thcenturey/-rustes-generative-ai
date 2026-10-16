@@ -1,7 +1,7 @@
 <!-- RAY-IMAGE README: product overview, research status, and reproducibility guide. -->
 
 <p align="center">
-  <img src="Screenshot_20261014-165136%20%281%29.png" alt="RAY-IMAGE research pipeline schematic: prompt, frozen Qwen3 text conditioning, flow-matching DiT, latent representation, and custom VAE decoder. This is an architecture illustration, not a generated sample." width="100%" />
+  <img src="Screenshot_20261014-165136%20%281%29.png" alt="Generated RAY-IMAGE sample image, shown as an illustrative output rather than a benchmark or quality guarantee." width="100%" />
 </p>
 
 <p align="center">
@@ -37,7 +37,7 @@
 
 The project is deliberately developed under tight compute limits. Its guiding rule is simple: **measure a failure before trying to train it away.** Architecture changes, training runs, checkpoint metadata, and evaluation assumptions should be inspectable rather than hidden behind a demo.
 
-> **Research preview:** this repository is not a hosted image-generation service or a polished model release. The real-world pipeline is still under research; a training script or a model architecture is not, by itself, evidence of reliable image quality. The banner above is a schematic, not a generated image.
+> **Research preview:** this repository is not a hosted image-generation service or a polished model release. The real-world pipeline is still under research; a training script or a model architecture is not, by itself, evidence of reliable image quality. The image above is a generated sample included for illustration. It is not a benchmark or a guarantee of consistent image quality across prompts.
 
 ## ✦ At a glance
 
