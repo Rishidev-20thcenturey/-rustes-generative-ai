@@ -253,6 +253,13 @@ The most valuable next steps are the ones that improve evidence and reduce risk 
 
 Issues and focused pull requests are welcome. Please include the affected phase/module, a minimal reproduction, expected vs. actual behavior, and any relevant logs or test output. Avoid uploading checkpoints, datasets, tokens, or personal credentials.
 
+## Contact
+
+For questions about RAY-IMAGE, research collaboration, or project feedback, contact:
+
+**Email:** [rishirajc406@gmail.com](mailto:rishirajc406@gmail.com)
+
+
 ---
 
 <p align="center">
