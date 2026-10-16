@@ -1,7 +1,7 @@
 <!-- RAY-IMAGE README: product overview, research status, and reproducibility guide. -->
 
 <p align="center">
-  <img src="assets/ray-image-hero.svg" alt="RAY-IMAGE research pipeline schematic: prompt, frozen Qwen3 text conditioning, flow-matching DiT, latent representation, and custom VAE decoder. This is an architecture illustration, not a generated sample." width="100%" />
+  <img src="Screenshot_20261014-165136%20%281%29.png" alt="RAY-IMAGE research pipeline schematic: prompt, frozen Qwen3 text conditioning, flow-matching DiT, latent representation, and custom VAE decoder. This is an architecture illustration, not a generated sample." width="100%" />
 </p>
 
 <p align="center">
